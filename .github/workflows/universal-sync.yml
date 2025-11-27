@@ -1,0 +1,46 @@
+name: Universal Repository Sync
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天 UTC 时间 2 点
+  workflow_dispatch:      # 手动触发
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/sync-rules.yaml'  # 配置变化时触发
+
+jobs:
+  sync-repositories:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout current repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: pip install pyyaml requests
+
+    - name: Run sync manager
+      run: python .github/scripts/sync_manager.py
+
+    - name: Commit and push changes
+      run: |
+        git add .
+        if ! git diff --staged --quiet; then
+          git commit -m "chore: auto-sync from multiple repositories [$(date +'%Y-%m-%d %H:%M')]"
+          git push
+          echo "✅ 更改已提交并推送"
+        else
+          echo "ℹ️ 没有检测到更改"
+        fi
