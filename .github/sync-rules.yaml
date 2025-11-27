@@ -15,7 +15,7 @@ repositories:
     branch: "main"
     rules:
       - type: "exclude"
-        patterns: ["tsthb.py", "README.md", "readme.md"]
+        patterns: ["tsthb.py", "README.md", "readme.md", "bwcj.js"]
     target_dir: "."
   
   # # 示例3：只要特定文件夹
