@@ -15,7 +15,7 @@ repositories:
     branch: "main"
     rules:
       - type: "exclude"
-        patterns: ["yht.py", "README.md", "readme.md"]
+        patterns: ["tshhb.py", "README.md", "readme.md"]
     target_dir: "sources/linbailo"
   
   # # 示例3：只要特定文件夹
