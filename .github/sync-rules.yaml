@@ -7,7 +7,7 @@ repositories:
     rules:
       - type: "include"
         patterns: ["tst.py"]
-    target_dir: "sources/wanvfx"
+    target_dir: "."
   
   # 示例2：排除特定文件
   linbailo-clean:
@@ -16,7 +16,7 @@ repositories:
     rules:
       - type: "exclude"
         patterns: ["tsthb.py", "README.md", "readme.md"]
-    target_dir: "sources/linbailo"
+    target_dir: "."
   
   # # 示例3：只要特定文件夹
   # some-project-src:
