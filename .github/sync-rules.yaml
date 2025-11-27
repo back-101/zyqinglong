@@ -1,0 +1,39 @@
+version: "1.0"
+repositories:
+  # 示例1：只要单个文件
+  wanvfx-tst:
+    source: "https://github.com/wanvfx/zyqinglong"
+    branch: "main"
+    rules:
+      - type: "include"
+        patterns: ["tst.py"]
+    target_dir: "sources/wanvfx"
+  
+  # 示例2：排除特定文件
+  linbailo-clean:
+    source: "https://github.com/linbailo/zyqinglong"
+    branch: "main"
+    rules:
+      - type: "exclude"
+        patterns: ["yht.py", "README.md", "readme.md"]
+    target_dir: "sources/linbailo"
+  
+  # # 示例3：只要特定文件夹
+  # some-project-src:
+  #   source: "https://github.com/someuser/somerepo"
+  #   branch: "main"
+  #   rules:
+  #     - type: "include"
+  #       patterns: ["src/**", "config/*.json"]
+  #   target_dir: "sources/someproject"
+  
+  # # 示例4：混合规则（先包含后排除）
+  # mixed-rules:
+  #   source: "https://github.com/another/repo"
+  #   branch: "main"
+  #   rules:
+  #     - type: "include"
+  #       patterns: ["docs/**", "scripts/*.py"]
+  #     - type: "exclude" 
+  #       patterns: ["docs/temp/", "scripts/old_*.py"]
+  #   target_dir: "sources/mixed"
