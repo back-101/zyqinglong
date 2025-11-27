@@ -1,0 +1,67 @@
+name: Sync Partial Files
+
+on:
+  schedule:
+    # 每天凌晨0点检查一次（UTC时间）
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 允许手动触发
+  push:
+    branches: [ main ]
+
+jobs:
+  sync-files:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout current repo
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Download specific files/folders
+      run: |
+        # 创建临时目录
+        mkdir temp_sync
+        
+        # 方法1：使用svn（简单，适合单个文件或文件夹）
+        # 安装svn
+        sudo apt-get install -y subversion
+        
+        # 下载特定文件夹（示例：只同步src目录）
+        svn export https://github.com/linbailo/zyqinglong/trunk/src temp_sync/src --force
+        
+        # 下载特定文件（示例：只同步README.md和package.json）
+        svn export https://github.com/[源仓库所有者]/[源仓库名]/trunk/README.md temp_sync/ --force
+        svn export https://github.com/[源仓库所有者]/[源仓库名]/trunk/package.json temp_sync/ --force
+        
+        # 方法2：使用sparse checkout（更灵活，适合复杂情况）
+        # cd temp_sync
+        # git init
+        # git remote add origin https://github.com/[源仓库所有者]/[源仓库名].git
+        # git config core.sparseCheckout true
+        # echo "src/" >> .git/info/sparse-checkout
+        # echo "README.md" >> .git/info/sparse-checkout
+        # echo "package.json" >> .git/info/sparse-checkout
+        # git pull origin main
+
+    - name: Copy files to current repo
+      run: |
+        # 将下载的文件复制到当前仓库的对应位置
+        cp -r temp_sync/* ./
+        # 或者复制到特定目录
+        # cp -r temp_sync/src ./src/
+        # cp -r temp_sync/README.md ./
+
+    - name: Commit and push if changes
+      run: |
+        git add .
+        if ! git diff --staged --quiet; then
+          git commit -m "chore: sync updated files from upstream [$(date +'%Y-%m-%d')]"
+          git push
+        else
+          echo "No changes to commit"
+        fi
