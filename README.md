@@ -5,3 +5,5 @@
 https://github.com/linbailo/zyqinglong
 
 https://github.com/wanvfx/zyqinglong
+
+https://gitee.com/hlt1995/qlScripts
