@@ -52,28 +52,82 @@ class RepositorySync:
             print(f"  ❌ 下载失败 {file_path}: {e}")
             return False
     
-    def clone_and_filter(self, repo_config, temp_dir):
-        """克隆仓库并根据规则过滤文件 - 支持 GitHub 和 Gitee"""
+    def clone_and_filter_files(self, repo_config, target_dir):
+        """使用克隆方式获取文件，支持排除文件和文件夹"""
         repo_url = repo_config['source']
-        repo_name = repo_url.split('/')[-1]
-        repo_dir = Path(temp_dir) / repo_name
-        
+        branch = repo_config.get('branch', 'main')
+    
+        # 获取规则
+        include_files = []
+        exclude_files = []
+        for rule in repo_config.get('rules', []):
+            if rule['type'] == 'include':
+                include_files.extend(rule['patterns'])
+            elif rule['type'] == 'exclude':
+                exclude_files.extend(rule['patterns'])
+    
+        temp_dir = tempfile.mkdtemp()
+    
         try:
-            # 克隆仓库（浅克隆）
             print(f"  📥 克隆仓库: {repo_url}")
-            subprocess.run([
+            result = subprocess.run([
                 'git', 'clone', '--depth', '1',
-                '--branch', repo_config.get('branch', 'main'),
-                repo_url, str(repo_dir)
-            ], check=True, capture_output=True)
-            
-            return repo_dir
-            
-        except subprocess.CalledProcessError as e:
-            print(f"  ❌ 克隆失败: {e}")
-            # 输出详细错误信息
-            print(f"  错误输出: {e.stderr.decode() if e.stderr else '无输出'}")
-            return None
+                '--branch', branch, repo_url, temp_dir
+            ], capture_output=True, text=True, encoding='utf-8')
+        
+            if result.returncode != 0:
+                print(f"  ❌ 克隆失败: {result.stderr}")
+                return False
+        
+            # 如果没有包含规则，默认包含所有文件
+            if not include_files:
+                include_files = ['*']
+        
+            # 查找并复制文件
+            copied_count = 0
+            for file_path in Path(temp_dir).rglob('*'):
+                if file_path.is_file() and '.git' not in str(file_path):
+                    relative_path = file_path.relative_to(Path(temp_dir))
+                    relative_str = str(relative_path)
+                
+                    # 检查文件路径是否包含任何排除的文件夹
+                    path_contains_excluded_folder = any(
+                        excluded in relative_str.split('/') 
+                        for excluded in exclude_files 
+                        if '/' not in excluded  # 只检查文件夹名
+                    )
+                
+                    # 检查是否应该包含（模式匹配）
+                    should_include = any(
+                        fnmatch.fnmatch(relative_str, include_pattern) 
+                        for include_pattern in include_files
+                    )
+                
+                    # 检查是否应该排除（模式匹配）
+                    should_exclude = any(
+                        fnmatch.fnmatch(relative_str, exclude_pattern) 
+                        for exclude_pattern in exclude_files
+                    )
+                
+                    # 最终决定：包含且不排除，且不包含排除的文件夹
+                    if (should_include and 
+                        not should_exclude and 
+                        not path_contains_excluded_folder):
+                        target_file = Path(target_dir) / file_path.name
+                        shutil.copy2(file_path, target_file)
+                        print(f"  📄 复制: {file_path.name}")
+                        copied_count += 1
+                    else:
+                        print(f"  🚫 排除: {relative_str}")
+        
+            print(f"  📊 结果: 复制了 {copied_count} 个文件")
+            return copied_count > 0
+        
+        except Exception as e:
+            print(f"  ❌ 克隆同步失败: {e}")
+            return False
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
     
     def should_include_file(self, file_path, rules, repo_name):
         """根据规则判断文件是否应该包含"""
@@ -206,3 +260,4 @@ if __name__ == "__main__":
     config_path = ".github/sync-rules.yaml"
     sync_manager = RepositorySync(config_path)
     sync_manager.sync_all()
+
