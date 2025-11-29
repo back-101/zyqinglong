@@ -17,7 +17,14 @@ repositories:
       - type: "exclude"
         patterns: ["tsthb.py", "README.md", "readme.md", "bwcj.js"]
     target_dir: "."
-  
+
+  gitee-hlt1995:
+    source: "https://gitee.com/hlt1995/qlScripts"
+    branch: "master"  # Gitee 通常用 master
+    rules:
+      - type: "include"
+        patterns: ["ChinaTelecomyyt.js", "Microsoft_Rewards_v2.1.py"]
+    target_dir: "."  # 根目录
   # # 示例3：只要特定文件夹
   # some-project-src:
   #   source: "https://github.com/someuser/somerepo"
