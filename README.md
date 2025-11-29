@@ -8,4 +8,6 @@ https://gitee.com/hlt1995/qlScripts
 
 https://gitee.com/liu-long068/QL_TimingScript
 
+https://gitee.com/shitou158/qlScript
+
 #### 脚本来自网络，如有侵权，请联系删除！
