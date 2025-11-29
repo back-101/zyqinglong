@@ -1,4 +1,4 @@
-name: Universal Repository Sync
+name: Universal Sync
 
 on:
   schedule:
