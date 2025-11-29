@@ -2,7 +2,7 @@ name: Universal Sync
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # 每天 UTC 时间 2 点
+    - cron: '0 2 * * *'  # 每天 UTC 时间 2 点
   workflow_dispatch:      # 手动触发
   push:
     branches: [ main, master ]
