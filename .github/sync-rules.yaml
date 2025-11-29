@@ -25,6 +25,26 @@ repositories:
       - type: "include"
         patterns: ["ChinaTelecomyyt.js", "Microsoft_Rewards_v2.1.py"]
     target_dir: "."  # 根目录
+
+  # 新的 Gitee 仓库，排除指定文件
+  gitee-liu-long068:
+    source: "https://gitee.com/liu-long068/QL_TimingScript"
+    branch: "master"
+    rules:
+      - type: "exclude"
+        patterns: 
+          - "WeChatPublicNumberPushInformation.py"
+          - "移动云盘抓authorization.zip"
+          - "README.md"
+          - "sendNotify.py"
+          - ".idea"
+          - "anmusi.py"
+          - "得物森林.py"
+          # 如果中文文件名有问题，也可以尝试使用通配符
+          - "*authorization*"
+          - "*得物*"
+          - "*森林*"
+    target_dir: "."  # 根目录
   # # 示例3：只要特定文件夹
   # some-project-src:
   #   source: "https://github.com/someuser/somerepo"
