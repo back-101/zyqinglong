@@ -26,15 +26,20 @@ class RepositorySync:
                 # GitHub 处理
                 raw_url = repo_url.replace('https://github.com/', 'https://raw.githubusercontent.com/')
                 raw_url = f"{raw_url}/{branch}/{file_path}"
+                print(f"  📥 GitHub 下载: {raw_url}")
+                
             elif 'gitee.com' in repo_url:
                 # Gitee 处理
-                # Gitee 的 raw 地址格式: https://gitee.com/用户名/仓库/raw/分支/文件路径
-                raw_url = repo_url.replace('https://gitee.com/', 'https://gitee.com/')
-                raw_url = f"{raw_url}/raw/{branch}/{file_path}"
+                parts = repo_url.replace('https://gitee.com/', '').split('/')
+                if len(parts) >= 2:
+                    user = parts[0]
+                    repo = parts[1]
+                    raw_url = f"https://gitee.com/{user}/{repo}/raw/{branch}/{file_path}"
+                    print(f"  📥 Gitee 下载: {raw_url}")
+                else:
+                    raise ValueError(f"无效的 Gitee URL: {repo_url}")
             else:
                 raise ValueError("暂不支持此代码托管平台")
-            
-            print(f"  📥 下载: {raw_url}")
             
             response = requests.get(raw_url, timeout=30)
             response.raise_for_status()
@@ -52,11 +57,41 @@ class RepositorySync:
             print(f"  ❌ 下载失败 {file_path}: {e}")
             return False
     
+    def should_include_path(self, relative_path, include_patterns, exclude_patterns):
+        """判断路径是否应该包含"""
+        relative_str = str(relative_path)
+        
+        # 如果没有包含规则，默认包含所有
+        if not include_patterns:
+            include_patterns = ['*']
+        
+        # 检查是否匹配任何包含模式
+        included = any(
+            fnmatch.fnmatch(relative_str, include_pattern) 
+            for include_pattern in include_patterns
+        )
+        
+        # 检查是否匹配任何排除模式
+        excluded = any(
+            fnmatch.fnmatch(relative_str, exclude_pattern) 
+            for exclude_pattern in exclude_patterns
+        )
+        
+        # 检查路径的任何部分是否是完全匹配的排除项（用于文件夹排除）
+        path_parts = relative_str.split('/')
+        folder_excluded = any(
+            excluded in path_parts 
+            for excluded in exclude_patterns 
+            if '/' not in excluded and '*' not in excluded and '?' not in excluded and '[' not in excluded
+        )
+        
+        return included and not excluded and not folder_excluded
+    
     def clone_and_filter_files(self, repo_config, target_dir):
         """使用克隆方式获取文件，支持排除文件和文件夹"""
         repo_url = repo_config['source']
         branch = repo_config.get('branch', 'main')
-    
+        
         # 获取规则
         include_files = []
         exclude_files = []
@@ -65,127 +100,47 @@ class RepositorySync:
                 include_files.extend(rule['patterns'])
             elif rule['type'] == 'exclude':
                 exclude_files.extend(rule['patterns'])
-    
+        
         temp_dir = tempfile.mkdtemp()
-    
+        
         try:
             print(f"  📥 克隆仓库: {repo_url}")
             result = subprocess.run([
                 'git', 'clone', '--depth', '1',
                 '--branch', branch, repo_url, temp_dir
             ], capture_output=True, text=True, encoding='utf-8')
-        
+            
             if result.returncode != 0:
                 print(f"  ❌ 克隆失败: {result.stderr}")
                 return False
-        
-            # 如果没有包含规则，默认包含所有文件
-            if not include_files:
-                include_files = ['*']
-        
+            
             # 查找并复制文件
             copied_count = 0
             for file_path in Path(temp_dir).rglob('*'):
                 if file_path.is_file() and '.git' not in str(file_path):
                     relative_path = file_path.relative_to(Path(temp_dir))
-                    relative_str = str(relative_path)
-                
-                    # 检查文件路径是否包含任何排除的文件夹
-                    path_contains_excluded_folder = any(
-                        excluded in relative_str.split('/') 
-                        for excluded in exclude_files 
-                        if '/' not in excluded  # 只检查文件夹名
-                    )
-                
-                    # 检查是否应该包含（模式匹配）
-                    should_include = any(
-                        fnmatch.fnmatch(relative_str, include_pattern) 
-                        for include_pattern in include_files
-                    )
-                
-                    # 检查是否应该排除（模式匹配）
-                    should_exclude = any(
-                        fnmatch.fnmatch(relative_str, exclude_pattern) 
-                        for exclude_pattern in exclude_files
-                    )
-                
-                    # 最终决定：包含且不排除，且不包含排除的文件夹
-                    if (should_include and 
-                        not should_exclude and 
-                        not path_contains_excluded_folder):
+                    
+                    if self.should_include_path(relative_path, include_files, exclude_files):
                         target_file = Path(target_dir) / file_path.name
                         shutil.copy2(file_path, target_file)
                         print(f"  📄 复制: {file_path.name}")
                         copied_count += 1
                     else:
-                        print(f"  🚫 排除: {relative_str}")
-        
+                        print(f"  🚫 排除: {relative_path}")
+            
             print(f"  📊 结果: 复制了 {copied_count} 个文件")
             return copied_count > 0
-        
+            
         except Exception as e:
             print(f"  ❌ 克隆同步失败: {e}")
             return False
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
     
-    def should_include_file(self, file_path, rules, repo_name):
-        """根据规则判断文件是否应该包含"""
-        file_path = str(file_path)
-        include_files = []
-        exclude_files = []
-        
-        # 分类规则
-        for rule in rules:
-            if rule['type'] == 'include':
-                include_files.extend(rule['patterns'])
-            elif rule['type'] == 'exclude':
-                exclude_files.extend(rule['patterns'])
-        
-        # 如果没有包含规则，默认包含所有
-        if not include_files:
-            include_files = ['*']
-        
-        # 检查是否匹配任何包含模式
-        included = any(fnmatch.fnmatch(file_path, pattern) for pattern in include_files)
-        
-        # 检查是否匹配任何排除模式
-        excluded = any(fnmatch.fnmatch(file_path, pattern) for pattern in exclude_files)
-        
-        # 永远排除 .git 目录
-        if '.git' in file_path:
-            return False
-            
-        return included and not excluded
-    
-    def copy_filtered_files(self, source_dir, target_dir, rules, repo_name):
-        """复制过滤后的文件"""
-        source_path = Path(source_dir)
-        target_path = Path(target_dir)
-        
-        copied_count = 0
-        
-        for file_path in source_path.rglob('*'):
-            if file_path.is_file():
-                relative_path = file_path.relative_to(source_path)
-                
-                if self.should_include_file(relative_path, rules, repo_name):
-                    # 如果目标目录是根目录，直接使用文件名
-                    if str(target_path) == ".":
-                        target_file = Path(relative_path.name)
-                    else:
-                        target_file = target_path / relative_path
-                    
-                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(file_path, target_file)
-                    print(f"  📄 复制: {relative_path} -> {target_file}")
-                    copied_count += 1
-        
-        return copied_count
-    
     def sync_repository(self, repo_name, repo_config):
         """同步单个仓库"""
         print(f"\n🔧 同步仓库: {repo_name}")
+        print(f"  源仓库: {repo_config['source']}")
         
         target_dir = repo_config['target_dir']
         if target_dir == ".":
@@ -194,19 +149,31 @@ class RepositorySync:
             target_path = Path(target_dir)
             target_path.mkdir(parents=True, exist_ok=True)
         
+        # 显示排除规则
+        exclude_rules = []
+        for rule in repo_config.get('rules', []):
+            if rule['type'] == 'exclude':
+                exclude_rules.extend(rule['patterns'])
+        if exclude_rules:
+            print(f"  排除规则: {exclude_rules}")
+        
+        # 对于 Gitee 仓库，优先使用克隆方式
+        if 'gitee.com' in repo_config['source']:
+            print("  🔄 对 Gitee 仓库使用克隆方式")
+            return self.clone_and_filter_files(repo_config, target_path)
+        
         # 检查是否只需要下载单个文件
         rules = repo_config.get('rules', [])
         include_rules = [r for r in rules if r['type'] == 'include']
         
-        # 如果只有包含规则且都是具体文件（没有通配符），使用直接下载
+        # 如果只有包含规则且都是具体文件，使用直接下载
         if (len(rules) == 1 and rules[0]['type'] == 'include' and
             all('*' not in pattern and '?' not in pattern and '[' not in pattern 
                 for pattern in rules[0]['patterns'])):
             
-            print("  🎯 使用直接下载模式（单个文件）")
+            print("  🎯 使用直接下载模式")
             success_count = 0
             for pattern in rules[0]['patterns']:
-                # 根目录下直接使用文件名
                 if target_dir == ".":
                     target_file = Path(Path(pattern).name)
                 else:
@@ -216,20 +183,18 @@ class RepositorySync:
                                     repo_config.get('branch', 'main')):
                     success_count += 1
             
+            # 如果直接下载失败，尝试克隆方式
+            if success_count == 0:
+                print("  🔄 直接下载失败，尝试克隆方式")
+                return self.clone_and_filter_files(repo_config, target_path)
+            
             print(f"  📊 结果: {success_count}/{len(rules[0]['patterns'])} 个文件下载成功")
             return success_count > 0
         
         else:
             # 使用克隆+过滤模式
             print("  🔄 使用克隆+过滤模式")
-            with tempfile.TemporaryDirectory() as temp_dir:
-                repo_dir = self.clone_and_filter(repo_config, temp_dir)
-                if not repo_dir:
-                    return False
-                
-                copied_count = self.copy_filtered_files(repo_dir, target_path, rules, repo_name)
-                print(f"  📊 结果: 复制了 {copied_count} 个文件")
-                return copied_count > 0
+            return self.clone_and_filter_files(repo_config, target_path)
     
     def sync_all(self):
         """同步所有配置的仓库"""
@@ -260,4 +225,3 @@ if __name__ == "__main__":
     config_path = ".github/sync-rules.yaml"
     sync_manager = RepositorySync(config_path)
     sync_manager.sync_all()
-
