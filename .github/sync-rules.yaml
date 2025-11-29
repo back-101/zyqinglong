@@ -22,7 +22,7 @@ repositories:
     source: "https://gitee.com/hlt1995/qlScripts"
     branch: "main"  # Gitee 通常用 master
     rules:
-      - type: "exclude"
+      - type: "include"
         patterns: ["ChinaTelecomyyt.js", "Microsoft_Rewards_v2.1.py"]
     target_dir: "."  # 根目录
   # # 示例3：只要特定文件夹
