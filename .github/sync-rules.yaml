@@ -33,6 +33,9 @@ repositories:
     rules:
       - type: "exclude"
         patterns: 
+          - "poetry.lock"
+          - "pyproject.toml"
+          - "heartSpin.html"
           - "WeChatPublicNumberPushInformation.py"
           - "移动云盘抓authorization.zip"
           - "README.md"
