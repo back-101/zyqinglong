@@ -15,7 +15,7 @@ repositories:
     branch: "main"
     rules:
       - type: "exclude"
-        patterns: ["tsthb.py", "README.md", "readme.md", "bwcj.js"]
+        patterns: ["tsthb.py", "README.md", "readme.md", "bwcj.js", "sendNotify.py"]
     target_dir: "."
 
   gitee-hlt1995:
