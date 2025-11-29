@@ -45,14 +45,19 @@ repositories:
           - "*得物*"
           - "*森林*"
     target_dir: "."  # 根目录
-  # # 示例3：只要特定文件夹
-  # some-project-src:
-  #   source: "https://github.com/someuser/somerepo"
-  #   branch: "main"
-  #   rules:
-  #     - type: "include"
-  #       patterns: ["src/**", "config/*.json"]
-  #   target_dir: "sources/someproject"
+    
+  gitee-shitou158:
+    source: "https://gitee.com/shitou158/qlScript"
+    branch: "master"
+    rules:
+      - type: "exclude"
+        patterns: 
+          - "微信截图_20250929232706.png"
+          - "info.txt"
+          - "README.md"
+          - "LICENSE"
+          - ".gitignore"
+    target_dir: "."  # 根目录
   
   # # 示例4：混合规则（先包含后排除）
   # mixed-rules:
