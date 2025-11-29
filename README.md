@@ -1,4 +1,4 @@
-## 🔗 拉库地址
+## 🔗 脚本原作者地址
 
 https://github.com/linbailo/zyqinglong
 
