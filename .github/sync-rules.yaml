@@ -36,6 +36,7 @@ repositories:
           - "poetry.lock"
           - "pyproject.toml"
           - "heartSpin.html"
+          - "sfsy.py"
           - "WeChatPublicNumberPushInformation.py"
           - "中国移动云盘.py"
           - "移动云盘抓authorization.zip"
