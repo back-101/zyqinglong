@@ -23,7 +23,7 @@ repositories:
     branch: "main"  # Gitee 通常用 master
     rules:
       - type: "include"
-        patterns: ["ChinaTelecomyyt.js", "Microsoft_Rewards_v2.1.py"]
+        patterns: ["ChinaTelecomyyt.js", "Microsoft_Rewards_v2.1.py", "SFExpress.py", "mcloud.py"]
     target_dir: "."  # 根目录
 
   # 新的 Gitee 仓库，排除指定文件
@@ -37,6 +37,7 @@ repositories:
           - "pyproject.toml"
           - "heartSpin.html"
           - "WeChatPublicNumberPushInformation.py"
+          - "中国移动云盘.py"
           - "移动云盘抓authorization.zip"
           - "README.md"
           - ".idea"
