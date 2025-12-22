@@ -41,6 +41,7 @@ repositories:
           - "中国移动云盘.py"
           - "移动云盘抓authorization.zip"
           - "README.md"
+          - "sendNotify.py"
           - ".idea"
           - "anmusi.py"
           - "得物森林.py"
