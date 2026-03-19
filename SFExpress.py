@@ -1,27 +1,26 @@
 # cron: 10 12 * * *
 # const $ = new Env('顺丰速运')
 
-# 变量名：sfsyUrl
-# 格式：多账号用&分割或创建多个变量sfsyUrl
-# 关于参数获取如下两种方式：
-# ❶顺丰APP绑定微信后，前往该站点sm.linzixuan.work用微信扫码登录后，选择复制编码Token，不要复制错
-# 或者
-# ❷打开小程序或APP-我的-积分, 手动抓包以下几种URL之一
-# https://mcs-mimp-web.sf-express.com/mcs-mimp/share/weChat/activityRedirect?
-# 抓好URL后访问https://www.toolhelper.cn/EncodeDecode/Url 进行编码，请务必按提示操作
-# 提醒：此脚本只适配插件提交或编码后的URL运行！
-# 提醒：此脚本只适配插件提交或编码后的URL运行！
-# 提醒：此脚本只适配插件提交或编码后的URL运行！
+"""
+顺丰速运日常积分任务
+Author: 爱学习的呆子
+Version: 1.2.0
+Date: 2026-03-17
+"""
+
 import hashlib
 import json
 import os
 import random
 import time
-from datetime import datetime, timedelta
-from sys import exit
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+from urllib.parse import unquote, urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
-from urllib.parse import unquote
 
 # ==================== Bark 推送配置 ====================
 # 添加自定义参数，也可以留空
@@ -38,75 +37,245 @@ os.environ["BARK_ICON"] = BARK_ICON
 os.environ["BARK_GROUP"] = BARK_GROUP
 os.environ["PUSH_SWITCH"] = PUSH_SWITCH
 
-# 禁用安全请求警告
+# 禁用SSL警告
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-PROXY_API_URL = os.getenv('SF_PROXY_API_URL', '')  # 从环境变量获取代理API地址
 
-try:
-    from notify import send as notify_send
-except ImportError:
-    print("❌ 未找到notify模块，将使用普通输出")
+# ==================== 代理相关配置常量 ====================
+PROXY_TIMEOUT = 15  # 代理超时时间（秒）
+MAX_PROXY_RETRIES = 5  # 最大代理重试次数
+REQUEST_RETRY_COUNT = 3  # 请求重试次数
 
-def get_proxy():
-    try:
-        if not PROXY_API_URL:
-            print('⚠️ 未配置代理API地址，将不使用代理')
+# ==================== 并发配置常量 ====================
+CONCURRENT_NUM = int(os.getenv('SFBF', '1'))  # 并发数量，默认为1（串行），最大20
+if CONCURRENT_NUM > 20:
+    CONCURRENT_NUM = 20
+    print(f'⚠️ 并发数量超过最大值20，已自动调整为20')
+elif CONCURRENT_NUM < 1:
+    CONCURRENT_NUM = 1
+    print(f'⚠️ 并发数量小于1，已自动调整为1（串行模式）')
+
+# 全局线程锁
+print_lock = Lock()  # 用于保护打印输出
+
+
+# ==================== 配置类 ====================
+@dataclass
+class Config:
+    """全局配置"""
+    APP_NAME: str = "顺丰速运"
+    VERSION: str = "1.2.0"
+    ENV_NAME: str = "sfsyUrl"
+    PROXY_API_URL: str = os.getenv('SF_PROXY_API_URL', '')
+    
+    # 代理相关配置常量
+    PROXY_TIMEOUT = 15  # 代理超时时间（秒）
+    MAX_PROXY_RETRIES = 5  # 最大代理重试次数
+    REQUEST_RETRY_COUNT = 3  # 请求重试次数
+    
+    # API签名配置
+    TOKEN: str = 'wwesldfs29aniversaryvdld29'
+    SYS_CODE: str = 'MCS-MIMP-CORE'
+    
+    # 任务跳过列表
+    SKIP_TASKS: List[str] = None
+    
+    def __post_init__(self):
+        if self.SKIP_TASKS is None:
+            # 尝试直接提交所有任务，看看能否领取奖励
+            # 原本跳过的任务：'用行业模板寄件下单'、'去新增一个收件偏好'
+            self.SKIP_TASKS = ['用行业模板寄件下单','用积分兑任意礼品','参与积分活动','每月累计寄件','完成每月任务','去使用AI寄件']
+
+
+# ==================== 日志系统 ====================
+class Logger:
+    """
+    日志管理器 - 实现图片中的日志风格
+    """
+    
+    # 日志图标
+    ICONS = {
+        'task_found': '🎯',      # 发现任务
+        'task_skip': '⏭️',       # 跳过任务
+        'task_complete': '✅',   # 任务完成
+        'reward_get': '🎁',      # 奖励领取
+        'info': '📝',            # 普通信息
+        'success': '✨',         # 成功
+        'error': '❌',           # 错误
+        'warning': '⚠️',        # 警告
+        'user': '👤',            # 用户信息
+        'money': '💰',           # 积分/金币
+        'gift': '🎁',            # 礼物
+        'target': '🎯',          # 目标
+    }
+    
+    def __init__(self):
+        self.messages: List[str] = []
+        self.current_account_msg: List[str] = []
+        self.lock = Lock()  # 每个Logger实例独立的锁
+    
+    def _format_msg(self, icon: str, content: str) -> str:
+        """格式化消息"""
+        return f"{icon} {content}"
+    
+    def _safe_print(self, msg: str):
+        """线程安全的打印"""
+        with print_lock:
+            print(msg)
+    
+    def task_found(self, task_name: str, status: int = 2):
+        """发现任务"""
+        msg = self._format_msg(self.ICONS['task_found'], f"发现任务: {task_name} (状态: {status})")
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def task_skip(self, task_name: str):
+        """跳过任务"""
+        msg = self._format_msg(self.ICONS['task_skip'], f"[{task_name}] 已跳过")
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def task_complete(self, task_name: str):
+        """任务完成"""
+        msg = self._format_msg(self.ICONS['task_complete'], f"[{task_name}] 提交成功")
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def reward_get(self, task_name: str):
+        """奖励领取成功"""
+        msg = self._format_msg(self.ICONS['reward_get'], f"[{task_name}] 奖励领取成功")
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def info(self, content: str):
+        """普通信息"""
+        msg = self._format_msg(self.ICONS['info'], content)
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def success(self, content: str):
+        """成功信息"""
+        msg = self._format_msg(self.ICONS['success'], content)
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def error(self, content: str):
+        """错误信息"""
+        msg = self._format_msg(self.ICONS['error'], content)
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def warning(self, content: str):
+        """警告信息"""
+        msg = self._format_msg(self.ICONS['warning'], content)
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def user_info(self, account_index: int, mobile: str):
+        """用户信息"""
+        msg = self._format_msg(self.ICONS['user'], f"账号{account_index}: 【{mobile}】登录成功")
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def points_info(self, points: int, prefix: str = "当前积分"):
+        """积分信息"""
+        msg = self._format_msg(self.ICONS['money'], f"{prefix}: 【{points}】")
+        self._safe_print(msg)
+        with self.lock:
+            self.current_account_msg.append(msg)
+            self.messages.append(msg)
+    
+    def reset_account_msg(self):
+        """重置当前账号消息"""
+        self.current_account_msg = []
+    
+    def get_all_messages(self) -> str:
+        """获取所有消息"""
+        return '\n'.join(self.messages)
+    
+    def get_account_messages(self) -> str:
+        """获取当前账号消息"""
+        return '\n'.join(self.current_account_msg)
+
+
+# ==================== 代理管理器 ====================
+class ProxyManager:
+    """代理管理器"""
+    
+    def __init__(self, api_url: str):
+        self.api_url = api_url
+        self.logger = Logger()
+    
+    def get_proxy(self) -> Optional[Dict[str, str]]:
+        """获取代理
+        返回格式：{'http': 'http://ip:port', 'https': 'http://ip:port'}
+        """
+        try:
+            if not self.api_url:
+                print('⚠️ 未配置代理API地址，将不使用代理')
+                return None
+            
+            response = requests.get(self.api_url, timeout=10)
+            if response.status_code == 200:
+                proxy_text = response.text.strip()
+                if ':' in proxy_text:
+                    # 构建代理URL
+                    if proxy_text.startswith('http://') or proxy_text.startswith('https://'):
+                        proxy = proxy_text
+                    else:
+                        proxy = f'http://{proxy_text}'
+                    
+                    # 隐藏认证信息用于显示（如果有的话）
+                    display_proxy = proxy
+                    if '@' in proxy:
+                        # 格式: http://user:pass@ip:port
+                        parts = proxy.split('@')
+                        if len(parts) == 2:
+                            display_proxy = f"http://***:***@{parts[1]}"
+                    
+                    print(f"✅ 成功获取代理: {display_proxy}")
+                    return {'http': proxy, 'https': proxy}
+            
+            print(f'❌ 获取代理失败: {response.text}')
             return None
-            
-        response = requests.get(PROXY_API_URL, timeout=10)
-        if response.status_code == 200:
-            proxy_text = response.text.strip()
-            if ':' in proxy_text:
-                proxy = f'http://{proxy_text}'
-                return {
-                    'http': proxy,
-                    'https': proxy
-                }
-        print(f'❌ 获取代理失败: {response.text}')
-        return None
-    except Exception as e:
-        print(f'❌ 获取代理异常: {str(e)}')
-        return None
+        except Exception as e:
+            print(f'❌ 获取代理异常: {str(e)}')
+            return None
 
-# 全局变量用于存储推送消息
-push_messages = []
-force_push = False
 
-def add_push_message(account_info, sign_info, point_info):
-    message = f"{account_info}\n{sign_info}\n{point_info}"
-    push_messages.append(message)
-
-def add_error_message(error_info):
-    global force_push
-    force_push = True
-    push_messages.append(f"❌ {error_info}")
-
-class RUN:
-    def __init__(self, info, index):
-        self.push_data = {
-            'account': '',
-            'sign': '',
-            'points': ''
-        }
-        self.has_error = False  # 标记当前账号是否有错误
-        split_info = info.split('@')
-        url = split_info[0]
-        len_split_info = len(split_info)
-        last_info = split_info[len_split_info - 1]
-        self.send_UID = None
-        if len_split_info > 0 and "UID_" in last_info:
-            self.send_UID = last_info
-        self.index = index + 1
-
-        self.proxy = get_proxy()
-        if self.proxy:
-            print(f"✅ 成功获取代理: {self.proxy['http']}")
+# ==================== HTTP客户端 ====================
+class SFHttpClient:
+    """顺丰HTTP客户端"""
+    
+    def __init__(self, config: Config, proxy_manager: ProxyManager):
+        self.config = config
+        self.proxy_manager = proxy_manager
+        self.session = requests.Session()
+        self.session.verify = False
         
-        self.s = requests.session()
-        self.s.verify = False
-        if self.proxy:
-            self.s.proxies = self.proxy
-            
+        # 设置代理
+        proxy = self.proxy_manager.get_proxy()
+        if proxy:
+            self.session.proxies = proxy
+        
+        # 默认请求头
         self.headers = {
             'Host': 'mcs-mimp-web.sf-express.com',
             'upgrade-insecure-requests': '1',
@@ -119,629 +288,940 @@ class RUN:
             'accept-language': 'zh-CN,zh',
             'platform': 'MINI_PROGRAM',
         }
+    
+    def _generate_sign(self) -> Dict[str, str]:
+        """生成API签名"""
+        timestamp = str(int(round(time.time() * 1000)))
+        data = f'token={self.config.TOKEN}&timestamp={timestamp}&sysCode={self.config.SYS_CODE}'
+        signature = hashlib.md5(data.encode()).hexdigest()
         
-        self.login_res = self.login(url)
-        self.all_logs = [] 
-        self.today = datetime.now().strftime('%Y-%m-%d')
-        self.member_day_black = False
-        self.member_day_red_packet_drew_today = False
-        self.member_day_red_packet_map = {}
-        self.max_level = 8
-        self.packet_threshold = 1 << (self.max_level - 1)
-        self.totalPoint = 0
-        self.initial_points = 0  # 初始积分
-        self.today_earned = 0    # 今日获得积分
+        return {
+            'sysCode': self.config.SYS_CODE,
+            'timestamp': timestamp,
+            'signature': signature
+        }
+    
+    def request(
+        self, 
+        url: str, 
+        method: str = 'POST', 
+        data: Optional[Dict] = None,
+        max_retries: int = REQUEST_RETRY_COUNT
+    ) -> Optional[Dict[str, Any]]:
+        """发送HTTP请求，带双层重试机制
+        
+        Args:
+            url: 请求URL
+            method: 请求方法 GET/POST
+            data: 请求数据
+            max_retries: 最大重试次数
+            
+        Returns:
+            响应JSON数据或None
+        """
+        # 更新签名
+        sign_data = self._generate_sign()
+        self.headers.update(sign_data)
+        
+        retry_count = 0
+        proxy_retry_count = 0
+        
+        while proxy_retry_count < MAX_PROXY_RETRIES:
+            try:
+                # 如果请求重试次数达到2次，尝试切换代理
+                if retry_count >= 2:
+                    print('请求已失败2次，尝试切换代理IP')
+                    new_proxy = self.proxy_manager.get_proxy()
+                    if new_proxy:
+                        self.session.proxies = new_proxy
+                    else:
+                        print('⚠️ 切换代理失败，无可用代理')
+                    retry_count = 0  # 重置请求重试计数
+                
+                try:
+                    if method.upper() == 'GET':
+                        response = self.session.get(url, headers=self.headers, timeout=PROXY_TIMEOUT)
+                    elif method.upper() == 'POST':
+                        response = self.session.post(url, headers=self.headers, json=data or {}, timeout=PROXY_TIMEOUT)
+                    else:
+                        raise ValueError(f'不支持的请求方法: {method}')
+                    
+                    # 检查响应状态码
+                    response.raise_for_status()
+                    
+                    try:
+                        res = response.json()
+                        if res is None:
+                            print(f'响应内容为空，正在重试 ({retry_count + 1}/{max_retries})')
+                            retry_count += 1
+                            time.sleep(2)
+                            continue
+                        return res
+                    except (json.JSONDecodeError, ValueError) as e:
+                        print(f'JSON解析失败: {str(e)}, 响应内容: {response.text[:200]}')
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            print(f'正在进行第{retry_count + 1}次重试...')
+                            time.sleep(2)
+                            continue
+                        return None
+                
+                except requests.exceptions.RequestException as e:
+                    retry_count += 1
+                    print(f'请求失败，正在重试 ({retry_count}/{max_retries}): {str(e)}')
+                    # 如果是代理错误或SSL错误，增加代理重试计数
+                    if 'ProxyError' in str(e) or 'SSLError' in str(e):
+                        proxy_retry_count += 1
+                        print(f'代理连接失败，尝试切换代理 ({proxy_retry_count}/{MAX_PROXY_RETRIES})')
+                        if proxy_retry_count < MAX_PROXY_RETRIES:
+                            new_proxy = self.proxy_manager.get_proxy()
+                            if new_proxy:
+                                self.session.proxies = new_proxy
+                    time.sleep(2)
+                    continue
+            
+            except Exception as e:
+                print(f'请求发生异常: {str(e)}')
+                proxy_retry_count += 1
+                if proxy_retry_count < MAX_PROXY_RETRIES:
+                    print(f'尝试切换代理 ({proxy_retry_count}/{MAX_PROXY_RETRIES})')
+                    time.sleep(2)
+                    continue
+                else:
+                    print('达到最大代理重试次数，返回None')
+                    return None
+        
+        print('请求最终失败，返回None')
+        return None
+    
+    def login(self, url: str, timeout: int = PROXY_TIMEOUT) -> tuple[bool, str, str]:
+        """
+        登录（兼容URL和CK格式）
 
-    def get_deviceId(self, characters='abcdef0123456789'):
+        Args:
+            url: 登录URL 或 CK字符串(sessionId=xxx;_login_mobile_=xxx;_login_user_id_=xxx)
+            timeout: 超时时间（秒）
+
+        Returns:
+            tuple: (是否成功, user_id, 手机号)
+        """
+        try:
+            decoded_input = unquote(url)
+            if decoded_input.startswith('sessionId=') or '_login_mobile_=' in decoded_input:
+                cookie_dict = {}
+                for item in decoded_input.split(';'):
+                    item = item.strip()
+                    if '=' in item:
+                        k, v = item.split('=', 1)
+                        cookie_dict[k] = v
+                for k, v in cookie_dict.items():
+                    self.session.cookies.set(k, v, domain='mcs-mimp-web.sf-express.com')
+                user_id = cookie_dict.get('_login_user_id_', '')
+                phone = cookie_dict.get('_login_mobile_', '')
+                if phone:
+                    return True, user_id, phone
+                else:
+                    return False, '', ''
+            else:
+                decoded_url = unquote(url)
+                self.session.get(decoded_url, headers=self.headers, timeout=timeout)
+                cookies = self.session.cookies.get_dict()
+                user_id = cookies.get('_login_user_id_', '')
+                phone = cookies.get('_login_mobile_', '')
+                if phone:
+                    return True, user_id, phone
+                else:
+                    return False, '', ''
+        except Exception as e:
+            print(f'登录异常: {str(e)}')
+            return False, '', ''
+
+
+# ==================== 任务执行器 ====================
+class TaskExecutor:
+    """任务执行器"""
+    
+    def __init__(
+        self, 
+        http_client: SFHttpClient, 
+        logger: Logger,
+        config: Config,
+        user_id: str
+    ):
+        self.http = http_client
+        self.logger = logger
+        self.config = config
+        self.user_id = user_id
+        self.total_points = 0
+        
+        # 任务相关属性
+        self.taskId = ""
+        self.taskCode = ""
+        self.strategyId = ""
+        self.title = ""
+    
+    @staticmethod
+    def generate_device_id(characters: str = 'abcdef0123456789') -> str:
+        """生成设备ID"""
         result = ''
         for char in 'xxxxxxxx-xxxx-xxxx':
             if char == 'x':
                 result += random.choice(characters)
-            elif char == 'X':
-                result += random.choice(characters).upper()
             else:
                 result += char
         return result
-
-    def login(self, sfurl):
+    
+    def _extract_task_id_from_url(self, url: str) -> str:
+        """从URL中提取taskId"""
         try:
-            decoded_url = unquote(sfurl)
-            ress = self.s.get(decoded_url, headers=self.headers)
-            self.user_id = self.s.cookies.get_dict().get('_login_user_id_', '')
-            self.phone = self.s.cookies.get_dict().get('_login_mobile_', '')
-            self.mobile = self.phone[:3] + "*" * 4 + self.phone[7:] if self.phone else ''
+            from urllib.parse import parse_qs, urlparse, unquote
+            import json
             
-            if self.phone:
-                print(f'👤 账号{self.index}:【{self.mobile}】登陆成功')
-                self.push_data['account'] = f'👤 账号{self.index}:【{self.mobile}】'
-                return True
-            else:
-                error_msg = f'账号{self.index}获取用户信息失败'
-                print(f'❌ {error_msg}')
-                self.push_data['account'] = f'❌ 账号{self.index}'
-                add_error_message(error_msg)
-                self.has_error = True
-                return False
+            # 处理_ug_view_param参数
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            
+            if '_ug_view_param' in params:
+                ug_params = json.loads(unquote(params['_ug_view_param'][0]))
+                if 'taskId' in ug_params:
+                    return str(ug_params['taskId'])  # 确保返回字符串类型
+                    
+            # 如果URL是JSON格式的，尝试解析
+            if url.startswith('com.sf-express://'):
+                json_str = url.split('_ug_view_param=')[1]
+                ug_params = json.loads(unquote(json_str))
+                if 'taskId' in ug_params:
+                    return str(ug_params['taskId'])  # 确保返回字符串类型
+                    
         except Exception as e:
-            error_msg = f'登录异常: {str(e)}'
-            print(f'❌ {error_msg}')
-            self.push_data['account'] = f'❌ 账号{self.index}'
-            add_error_message(error_msg)
-            self.has_error = True
-            return False
-
-    def getSign(self):
-        timestamp = str(int(round(time.time() * 1000)))
-        token = 'wwesldfs29aniversaryvdld29'
-        sysCode = 'MCS-MIMP-CORE'
-        data = f'token={token}&timestamp={timestamp}&sysCode={sysCode}'
-        signature = hashlib.md5(data.encode()).hexdigest()
-        data = {
-            'sysCode': sysCode,
-            'timestamp': timestamp,
-            'signature': signature
-        }
-        self.headers.update(data)
-        return data
-
-    def do_request(self, url, data={}, req_type='post', max_retries=3):
-        self.getSign()
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                if req_type.lower() == 'get':
-                    response = self.s.get(url, headers=self.headers, timeout=30)
-                elif req_type.lower() == 'post':
-                    response = self.s.post(url, headers=self.headers, json=data, timeout=30)
-                else:
-                    raise ValueError('Invalid req_type: %s' % req_type)
-                    
-                response.raise_for_status()
-                
-                try:
-                    res = response.json()
-                    return res
-                except json.JSONDecodeError as e:
-                    print(f'JSON解析失败: {str(e)}, 响应内容: {response.text[:200]}')
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        print(f'正在进行第{retry_count + 1}次重试...')
-                        time.sleep(2)
-                        continue
-                    return None
-                    
-            except requests.exceptions.RequestException as e:
-                retry_count += 1
-                if retry_count < max_retries:
-                    print(f'请求失败，正在切换代理重试 ({retry_count}/{max_retries}): {str(e)}')
-                    self.proxy = get_proxy()
-                    if self.proxy:
-                        print(f"✅ 成功获取新代理: {self.proxy['http']}")
-                        self.s.proxies = self.proxy
-                    time.sleep(2)
-                else:
-                    print('请求最终失败:', e)
-                    return None
-                
-        return None
-
-    def sign(self):
-        print(f'🎯 开始执行签到')
-        json_data = {"comeFrom": "vioin", "channelFrom": "WEIXIN"}
-        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskSignPlusService~automaticSignFetchPackage'
-        response = self.do_request(url, data=json_data)
-        if response.get('success') == True:
-            count_day = response.get('obj', {}).get('countDay', 0)
-            if response.get('obj') and response['obj'].get('integralTaskSignPackageVOList'):
-                packet_name = response["obj"]["integralTaskSignPackageVOList"][0]["packetName"]
-                sign_msg = f'✨ 签到成功，获得【{packet_name}】，本周累计签到【{count_day}】天'
-                print(sign_msg)
-                self.push_data['sign'] = f'✨ 签到成功，本周累计签到【{count_day}】天'
-            else:
-                sign_msg = f'📝 今日已签到，本周累计签到【{count_day}】天'
-                print(sign_msg)
-                self.push_data['sign'] = f'📝 今日已签到，本周累计签到【{count_day}】天'
-        else:
-            error_msg = f'签到失败！原因：{response.get("errorMessage")}'
-            print(f'❌ {error_msg}')
-            self.push_data['sign'] = '❌ 签到失败'
-            add_error_message(error_msg)
-            self.has_error = True
-
-    def superWelfare_receiveRedPacket(self):
-        print(f'🎁 超值福利签到')
-        json_data = {
-            'channel': 'czflqdlhbxcx'
-        }
-        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberActLengthy~redPacketActivityService~superWelfare~receiveRedPacket'
-        response = self.do_request(url, data=json_data)
-        if response.get('success') == True:
-            gift_list = response.get('obj', {}).get('giftList', [])
-            if response.get('obj', {}).get('extraGiftList', []):
-                gift_list.extend(response['obj']['extraGiftList'])
-            gift_names = ', '.join([gift['giftName'] for gift in gift_list])
-            receive_status = response.get('obj', {}).get('receiveStatus')
-            status_message = '领取成功' if receive_status == 1 else '已领取过'
-            print(f'🎉 超值福利签到[{status_message}]: {gift_names}')
-        else:
-            error_message = response.get('errorMessage') or json.dumps(response) or '无返回'
-            print(f'❌ 超值福利签到失败: {error_message}')
-
-    def get_SignTaskList(self, END=False):
-        if not END: 
-            print(f'🎯 开始获取签到任务列表')
-            # 记录初始积分
-            json_data = {
-                'channelType': '1',
-                'deviceId': self.get_deviceId(),
-            }
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskStrategyService~queryPointTaskAndSignFromES'
-            response = self.do_request(url, data=json_data)
-            if response.get('success') == True and response.get('obj') != []:
-                self.initial_points = response["obj"]["totalPoint"]
-                print(f'💰 初始积分：【{self.initial_points}】')
-        else:
-            print(f'🎯 获取最终积分')
-            json_data = {
-                'channelType': '1',
-                'deviceId': self.get_deviceId(),
-            }
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskStrategyService~queryPointTaskAndSignFromES'
-            response = self.do_request(url, data=json_data)
-            if response.get('success') == True and response.get('obj') != []:
-                self.totalPoint = response["obj"]["totalPoint"]
-                self.today_earned = self.totalPoint - self.initial_points
-                points_msg = f'💰 当前积分：【{self.totalPoint}】'
-                if self.today_earned > 0:
-                    points_msg += f'（+{self.today_earned}）'
-                print(points_msg)
-                self.push_data['points'] = points_msg
-                return
+            self.logger.warning(f'从URL提取taskId失败: {e}')
             
-        if response.get('success') == True and response.get('obj') != []:
-            self.totalPoint = response["obj"]["totalPoint"]
-            if not END:
-                print(f'💰 执行前积分：【{self.totalPoint}】')
-                for task in response["obj"]["taskTitleLevels"]:
-                    self.taskId = task["taskId"]
-                    self.taskCode = task["taskCode"]
-                    self.strategyId = task["strategyId"]
-                    self.title = task["title"]
-                    status = task["status"]
-                    skip_title = ['用行业模板寄件下单', '去新增一个收件偏好', '参与积分活动']
-                    if status == 3:
-                        print(f'✨ {self.title}-已完成')
-                        continue
-                    if self.title in skip_title:
-                        print(f'⏭️ {self.title}-跳过')
-                        continue
+        return ''
+        
+    def _set_task_attrs(self, task: Dict) -> None:
+        """设置任务属性"""
+        self.taskId = str(task.get('taskId', ''))  # 确保是字符串类型
+        self.taskCode = str(task.get('taskCode', ''))  # 确保是字符串类型
+        self.strategyId = int(task.get('strategyId', 0))  # 确保是整数类型
+        self.title = str(task.get('title', '未知任务'))
+        self.point = int(task.get('point', 0))  # 确保是整数类型
+        
+        # 如果taskCode为空，尝试从buttonRedirect中提取
+        if not self.taskCode and 'buttonRedirect' in task:
+            extracted_task_id = self._extract_task_id_from_url(task['buttonRedirect'])
+            if extracted_task_id:
+                self.taskCode = extracted_task_id
+                self.logger.info(f'从buttonRedirect中提取到taskId: {self.taskCode}')
+    
+    def app_sign_in(self) -> tuple[bool, str]:
+        """APP每日签到（使用getUnFetchPointAndDiscount接口触发签到+领取）
+        
+        Returns:
+            tuple[bool, str]: (是否成功, 错误信息)
+        """
+        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskSignPlusService~getUnFetchPointAndDiscount'
+        data = {}
+        
+        # 保存原有的platform头
+        original_platform = self.http.headers.get('platform', 'MINI_PROGRAM')
+        
+        # 临时切换为APP平台
+        self.http.headers['platform'] = 'SFAPP'
+        
+        try:
+            response = self.http.request(url, data=data)
+            if response and response.get('success'):
+                obj = response.get('obj', [])
+                
+                # 响应是一个数组，包含待领取的奖励
+                if obj and isinstance(obj, list) and len(obj) > 0:
+                    total_points = 0
+                    reward_names = []
+                    for item in obj:
+                        packet_name = item.get('packetName', '未知奖励')
+                        detail_value = item.get('detailValue', '0')
+                        reward_names.append(packet_name)
+                        try:
+                            total_points += int(detail_value)
+                        except:
+                            pass
+                    
+                    self.logger.success(f'[APP签到] 签到成功，获得【{", ".join(reward_names)}】')
+                else:
+                    self.logger.info(f'[APP签到] 今日已签到或无可领取奖励')
+                
+                return True, ''
+            else:
+                error_msg = response.get('errorMessage', '未知错误') if response else '请求失败'
+                
+                # 如果返回"没有待领取礼包"，等待1秒后再次调用接口
+                if '没有待领取礼包' in error_msg:
+                    self.logger.info(f'[APP签到] 检测到需要二次领取，等待1秒后重试...')
+                    time.sleep(1)
+                    
+                    # 再次调用getUnFetchPointAndDiscount接口
+                    response2 = self.http.request(url, data=data)
+                    if response2 and response2.get('success'):
+                        obj2 = response2.get('obj', [])
+                        
+                        if obj2 and isinstance(obj2, list) and len(obj2) > 0:
+                            total_points = 0
+                            reward_names = []
+                            for item in obj2:
+                                packet_name = item.get('packetName', '未知奖励')
+                                detail_value = item.get('detailValue', '0')
+                                reward_names.append(packet_name)
+                                try:
+                                    total_points += int(detail_value)
+                                except:
+                                    pass
+                            
+                            self.logger.success(f'[APP签到] 二次领取成功，获得【{", ".join(reward_names)}】')
+                        else:
+                            self.logger.info(f'[APP签到] 二次领取完成，但无可领取奖励')
+                        
+                        return True, ''
                     else:
-                        self.doTask()
-                        time.sleep(3)
-                    self.receiveTask()
-
-    def doTask(self):
-        print(f'🎯 开始去完成【{self.title}】任务')
-        json_data = {
-            'taskCode': self.taskCode,
-        }
-        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonRoutePost/memberEs/taskRecord/finishTask'
-        response = self.do_request(url, data=json_data)
-        if response.get('success') == True:
-            print(f'✨ 【{self.title}】任务-已完成')
+                        error_msg2 = response2.get('errorMessage', '未知错误') if response2 else '请求失败'
+                        self.logger.error(f'[APP签到] 二次领取失败: {error_msg2}')
+                        return False, error_msg2
+                else:
+                    self.logger.error(f'[APP签到] 失败: {error_msg}')
+                    return False, error_msg
+        finally:
+            # 恢复原有的platform头
+            self.http.headers['platform'] = original_platform
+    
+    def sign_in(self) -> tuple[bool, int, str, str]:
+        """小程序每日签到
+        
+        Returns:
+            tuple: (是否成功, countDay, packetName, 错误信息)
+        """
+        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskSignPlusService~automaticSignFetchPackage'
+        data = {"comeFrom": "vioin", "channelFrom": "WEIXIN"}
+        
+        response = self.http.request(url, data=data)
+        if response and response.get('success'):
+            count_day = response.get('obj', {}).get('countDay', 0)
+            packet_list = response.get('obj', {}).get('integralTaskSignPackageVOList', [])
+            packet_name = packet_list[0].get('packetName', '') if packet_list else ''
+            self.logger.success(f'签到成功，获得【{packet_name}】，本周累计签到【{count_day + 1}】天')
+            return True, count_day, packet_name, ''
         else:
-            print(f'❌ 【{self.title}】任务-{response.get("errorMessage")}')
-
-    def receiveTask(self):
-        print(f'🎁 开始领取【{self.title}】任务奖励')
-        json_data = {
+            error_msg = response.get('errorMessage', '未知错误') if response else '请求失败'
+            self.logger.error(f'签到失败: {error_msg}')
+            return False, 0, '', error_msg
+    
+    def get_task_list(self) -> List[Dict]:
+        """获取任务列表"""
+        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskStrategyService~queryPointTaskAndSignFromES'
+        
+        all_tasks = []
+        task_codes_seen = set() 
+        
+        for channel_type in ['1', '2', '3', '4','01','02','03','04']:
+            data = {
+                'channelType': channel_type,
+                'deviceId': self.generate_device_id(),
+            }
+            
+            response = self.http.request(url, data=data)
+            
+            if response and response.get('success') and response.get('obj'):
+                # 只在第一次请求时获取总积分
+                if channel_type == '1':
+                    self.total_points = response['obj'].get('totalPoint', 0)
+                
+                tasks = response['obj'].get('taskTitleLevels', [])
+                
+                # 去重添加任务
+                for task in tasks:
+                    task_code = task.get('taskCode')
+                    task_title = task.get('title', '未知任务')
+                    
+                    # 尝试提取taskId
+                    if 'buttonRedirect' in task:
+                        extracted_id = self._extract_task_id_from_url(task['buttonRedirect'])
+                        if extracted_id and not task_code:
+                            task_code = extracted_id
+                            task['taskCode'] = extracted_id
+                    
+                    # 如果taskCode为空，但能从buttonRedirect中提取到taskId，则使用提取的taskId
+                    if not task_code and 'buttonRedirect' in task:
+                        extracted_id = self._extract_task_id_from_url(task['buttonRedirect'])
+                        if extracted_id:
+                            task['taskCode'] = extracted_id
+                            task_code = extracted_id
+                    
+                    # 如果taskCode仍然为空，则跳过
+                    if not task_code:
+                        continue
+                        
+                    # 检查是否已存在相同taskCode的任务
+                    if task_code not in task_codes_seen:
+                        task_codes_seen.add(task_code)
+                        all_tasks.append(task)
+            else:
+                error_msg = response.get('errorMessage', '未知错误') if response else '请求失败'
+                self.logger.warning(f'获取 channelType={channel_type} 的任务失败: {error_msg}')
+        
+        return all_tasks
+    
+    def execute_task(self) -> bool:
+        """执行单个任务"""
+        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonRoutePost/memberEs/taskRecord/finishTask'
+        data = {'taskCode': self.taskCode}
+        
+        response = self.http.request(url, data=data)
+        if response and response.get('success'):
+            return True
+        return False
+    
+    def _update_points(self):
+        """更新积分显示"""
+        tasks = self.get_task_list()
+        if tasks:
+            self.logger.points_info(self.total_points, "当前积分")
+    
+    def receive_task_reward(self) -> bool:
+        """领取任务奖励"""
+        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskStrategyService~fetchIntegral'
+        data = {
             "strategyId": self.strategyId,
             "taskId": self.taskId,
             "taskCode": self.taskCode,
-            "deviceId": self.get_deviceId()
+            "deviceId": self.generate_device_id()
         }
-        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~integralTaskStrategyService~fetchIntegral'
-        response = self.do_request(url, data=json_data)
-        if response.get('success') == True:
-            print(f'✨ 【{self.title}】任务奖励领取成功！')
+        
+        response = self.http.request(url, data=data)
+        if response:
+            if response.get('success'):
+                self.logger.success(f'成功领取任务奖励: {self.title}')
+                return True
+        return False
+    
+    def get_welfare_list(self) -> List[Dict]:
+        """获取生活特权列表"""
+        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberGoods~mallGoodsLifeService~list'
+        data = {
+            "memGrade": 3,
+            "categoryCode": "SHTQ",
+            "showCode": "SHTQWNTJ"
+        }
+        
+        response = self.http.request(url, data=data)
+        if response and response.get('success'):
+            obj_list = response.get('obj', [])
+            # 收集所有可领取的特权
+            welfare_list = []
+            for module in obj_list:
+                goods_list = module.get('goodsList', [])
+                for goods in goods_list:
+                    # exchangeStatus=1 表示可以领取
+                    if goods.get('exchangeStatus') == 1:
+                        welfare_list.append({
+                            'goodsId': goods.get('goodsId'),
+                            'goodsNo': goods.get('goodsNo'),
+                            'goodsName': goods.get('goodsName'),
+                            'showName': goods.get('showName', ''),
+                            'id': goods.get('id')
+                        })
+            return welfare_list
+        return []
+    
+    def receive_welfare(self, goods_no: str, goods_name: str, task_code: str) -> bool:
+        """领取生活特权"""
+        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberGoods~pointMallService~createOrder'
+        data = {
+            "from": "Point_Mall",
+            "orderSource": "POINT_MALL_EXCHANGE",
+            "goodsNo": goods_no,
+            "quantity": 1,
+            "taskCode": task_code
+        }
+        
+        response = self.http.request(url, data=data)
+        if response and response.get('success'):
+            order_no = response.get('obj', {}).get('orderNo', '')
+            self.logger.success(f'成功领取生活特权: {goods_name} (订单号: {order_no})')
+            return True
         else:
-            print(f'❌ 【{self.title}】任务-{response.get("errorMessage")}')
-
-    # 其他方法保持不变...
-    def EAR_END_2023_TaskList(self):
-        print('\n🎭 开始年终集卡任务')
-        json_data = {
-            "activityCode": "YEAREND_2024",
-            "channelType": "MINI_PROGRAM"
-        }
-        self.headers['channel'] = '24nzdb'
-        self.headers['platform'] = 'MINI_PROGRAM'
-        self.headers['syscode'] = 'MCS-MIMP-CORE'
-
-        url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~activityTaskService~taskList'
-
-        response = self.do_request(url, data=json_data)
-        if response.get('success') == True:
-            for item in response["obj"]:
-                self.title = item["taskName"]
-                self.taskType = item["taskType"]
-                status = item["status"]
-                if status == 3:
-                    print(f'✨ 【{self.taskType}】-已完成')
-                    continue
-                if self.taskType == 'INTEGRAL_EXCHANGE':
-                    print(f'⚠️ 积分兑换任务暂不支持')
-                elif self.taskType == 'CLICK_MY_SETTING':
-                    self.taskCode = item["taskCode"]
-                    self.addDeliverPrefer()
-                if "taskCode" in item:
-                    self.taskCode = item["taskCode"]
-                    self.doTask()
-                    time.sleep(3)
-                    self.receiveTask()
-                else:
-                    print(f'⚠️ 暂时不支持【{self.title}】任务')
-
-    def addDeliverPrefer(self):
-        print(f'>>>开始【{self.title}】任务')
-        json_data = {
-            "country": "中国",
-            "countryCode": "A000086000",
-            "province": "北京市",
-            "provinceCode": "A110000000",
-            "city": "北京市",
-            "cityCode": "A111000000",
-            "county": "东城区",
-            "countyCode": "A110101000",
-            "address": "1号楼1单元101",
-            "latitude": "",
-            "longitude": "",
-            "memberId": "",
-            "locationCode": "010",
-            "zoneCode": "CN",
-            "postCode": "",
-            "takeWay": "7",
-            "callBeforeDelivery": 'false',
-            "deliverTag": "2,3,4,1",
-            "deliverTagContent": "",
-            "startDeliverTime": "",
-            "selectCollection": 'false',
-            "serviceName": "",
-            "serviceCode": "",
-            "serviceType": "",
-            "serviceAddress": "",
-            "serviceDistance": "",
-            "serviceTime": "",
-            "serviceTelephone": "",
-            "channelCode": "RW11111",
-            "taskId": self.taskId,
-            "extJson": "{\"noDeliverDetail\":[]}"
-        }
-        url = 'https://ucmp.sf-express.com/cx-wechat-member/member/deliveryPreference/addDeliverPrefer'
-        response = self.do_request(url, data=json_data)
-        if response.get('success') == True:
-            print('新增一个收件偏好，成功')
-        else:
-            print(f'>【{self.title}】任务-{response.get("errorMessage")}')
-
-    def member_day_index(self):
-        print('🎭 会员日活动')
-        try:
-            invite_user_id = random.choice([invite for invite in inviteId if invite != self.user_id])
-            payload = {'inviteUserId': invite_user_id}
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~memberDayIndexService~index'
-
-            response = self.do_request(url, data=payload)
-            if response.get('success'):
-                lottery_num = response.get('obj', {}).get('lotteryNum', 0)
-                can_receive_invite_award = response.get('obj', {}).get('canReceiveInviteAward', False)
-                if can_receive_invite_award:
-                    self.member_day_receive_invite_award(invite_user_id)
-                self.member_day_red_packet_status()
-                print(f'🎁 会员日可以抽奖{lottery_num}次')
-                for _ in range(lottery_num):
-                    self.member_day_lottery()
-                if self.member_day_black:
-                    return
-                self.member_day_task_list()
-                if self.member_day_black:
-                    return
-                self.member_day_red_packet_status()
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print(f'📝 查询会员日失败: {error_message}')
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_receive_invite_award(self, invite_user_id):
-        try:
-            payload = {'inviteUserId': invite_user_id}
-
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~memberDayIndexService~receiveInviteAward'
-
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                product_name = response.get('obj', {}).get('productName', '空气')
-                print(f'🎁 会员日奖励: {product_name}')
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print(f'📝 领取会员日奖励失败: {error_message}')
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_lottery(self):
-        try:
-            payload = {}
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~memberDayLotteryService~lottery'
-
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                product_name = response.get('obj', {}).get('productName', '空气')
-                print(f'🎁 会员日抽奖: {product_name}')
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print(f'📝 会员日抽奖失败: {error_message}')
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_task_list(self):
-        try:
-            payload = {'activityCode': 'MEMBER_DAY', 'channelType': 'MINI_PROGRAM'}
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~activityTaskService~taskList'
-
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                task_list = response.get('obj', [])
-                for task in task_list:
-                    if task['status'] == 1:
-                        if self.member_day_black:
-                            return
-                        self.member_day_fetch_mix_task_reward(task)
-                for task in task_list:
-                    if task['status'] == 2:
-                        if self.member_day_black:
-                            return
-                        if task['taskType'] in ['SEND_SUCCESS', 'INVITEFRIENDS_PARTAKE_ACTIVITY', 'OPEN_SVIP',
-                                                'OPEN_NEW_EXPRESS_CARD', 'OPEN_FAMILY_CARD', 'CHARGE_NEW_EXPRESS_CARD',
-                                                'INTEGRAL_EXCHANGE']:
-                            pass
-                        else:
-                            for _ in range(task['restFinishTime']):
-                                if self.member_day_black:
-                                    return
-                                self.member_day_finish_task(task)
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print('📝 查询会员日任务失败: ' + error_message)
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_finish_task(self, task):
-        try:
-            payload = {'taskCode': task['taskCode']}
-
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberEs~taskRecord~finishTask'
-
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                print('📝 完成会员日任务[' + task['taskName'] + ']成功')
-                self.member_day_fetch_mix_task_reward(task)
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print('📝 完成会员日任务[' + task['taskName'] + ']失败: ' + error_message)
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_fetch_mix_task_reward(self, task):
-        try:
-            payload = {'taskType': task['taskType'], 'activityCode': 'MEMBER_DAY', 'channelType': 'MINI_PROGRAM'}
-
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~activityTaskService~fetchMixTaskReward'
-
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                print('🎁 领取会员日任务[' + task['taskName'] + ']奖励成功')
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print('📝 领取会员日任务[' + task['taskName'] + ']奖励失败: ' + error_message)
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_receive_red_packet(self, hour):
-        try:
-            payload = {'receiveHour': hour}
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~memberDayTaskService~receiveRedPacket'
-
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                print(f'🎁 会员日领取{hour}点红包成功')
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print(f'📝 会员日领取{hour}点红包失败: {error_message}')
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_red_packet_status(self):
-        try:
-            payload = {}
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~memberDayPacketService~redPacketStatus'
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                packet_list = response.get('obj', {}).get('packetList', [])
-                for packet in packet_list:
-                    self.member_day_red_packet_map[packet['level']] = packet['count']
-
-                for level in range(1, self.max_level):
-                    count = self.member_day_red_packet_map.get(level, 0)
-                    while count >= 2:
-                        self.member_day_red_packet_merge(level)
-                        count -= 2
-                packet_summary = []
-                remaining_needed = 0
-
-                for level, count in self.member_day_red_packet_map.items():
-                    if count == 0:
-                        continue
-                    packet_summary.append(f"[{level}级]X{count}")
-                    int_level = int(level)
-                    if int_level < self.max_level:
-                        remaining_needed += 1 << (int_level - 1)
-
-                print("📝 会员日合成列表: " + ", ".join(packet_summary))
-
-                if self.member_day_red_packet_map.get(self.max_level):
-                    print(f"🎁 会员日已拥有[{self.max_level}级]红包X{self.member_day_red_packet_map[self.max_level]}")
-                    self.member_day_red_packet_draw(self.max_level)
-                else:
-                    remaining = self.packet_threshold - remaining_needed
-                    print(f"📝 会员日距离[{self.max_level}级]红包还差: [1级]红包X{remaining}")
-
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print(f'📝 查询会员日合成失败: {error_message}')
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_red_packet_merge(self, level):
-        try:
-            # for key,level in enumerate(self.member_day_red_packet_map):
-            #     pass
-            payload = {'level': level, 'num': 2}
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~memberDayPacketService~redPacketMerge'
-
-            response = self.do_request(url, payload)
-            if response.get('success'):
-                print(f'🎁 会员日合成: [{level}级]红包X2 -> [{level + 1}级]红包')
-                self.member_day_red_packet_map[level] -= 2
-                if not self.member_day_red_packet_map.get(level + 1):
-                    self.member_day_red_packet_map[level + 1] = 0
-                self.member_day_red_packet_map[level + 1] += 1
-            else:
-                error_message = response.get('errorMessage', '无返回')
-                print(f'📝 会员日合成两个[{level}级]红包失败: {error_message}')
-                if '没有资格参与活动' in error_message:
-                    self.member_day_black = True
-                    print('📝 会员日任务风控')
-        except Exception as e:
-            print(e)
-
-    def member_day_red_packet_draw(self, level):
-        try:
-            payload = {'level': str(level)}
-            url = 'https://mcs-mimp-web.sf-express.com/mcs-mimp/commonPost/~memberNonactivity~memberDayPacketService~redPacketDraw'
-            response = self.do_request(url, payload)
-            if response and response.get('success'):
-                coupon_names = [item['couponName'] for item in response.get('obj', [])] or []
-
-                print(f"🎁 会员日提取[{level}级]红包: {', '.join(coupon_names) or '空气'}")
-            else:
-                error_message = response.get('errorMessage') if response else "无返回"
-                print(f"📝 会员日提取[{level}级]红包失败: {error_message}")
-                if "没有资格参与活动" in error_message:
-                    self.memberDay_black = True
-                    print("📝 会员日任务风控")
-        except Exception as e:
-            print(e)
-
-    def main(self):
-        wait_time = random.randint(1000, 3000) / 1000.0  
-        time.sleep(wait_time)  
-        if not self.login_res: 
+            error_msg = response.get('errorMessage', '未知错误') if response else '请求失败'
+            self.logger.error(f'领取生活特权失败: {goods_name} - {error_msg}')
             return False
-
-        self.sign()
-        self.superWelfare_receiveRedPacket()
-        self.get_SignTaskList()
-        self.get_SignTaskList(True)
-
-        current_date = datetime.now().day
-        if 26 <= current_date <= 28:
-            self.member_day_index()
-        else:
-            print('⏰ 未到指定时间不执行会员日任务\n==================================\n')
-
-        # 添加到推送消息列表
-        if self.push_data['account'] and self.push_data['sign'] and self.push_data['points']:
-            add_push_message(self.push_data['account'], self.push_data['sign'], self.push_data['points'])
-
-        return True
-
-def send_notification():
-    """发送推送通知"""
-    if not push_messages:
-        print("❌ 没有可推送的消息")
-        return
+    
+    def handle_welfare_task(self, task_title: str) -> bool:
+        """处理领取生活特权任务"""
+        self.logger.info('正在获取生活特权列表...')
         
-    # 构建推送内容
-    title = "🚚 顺丰速运签到结果\n"
-    content = "\n\n".join(push_messages)
+        welfare_list = self.get_welfare_list()
+        if not welfare_list:
+            self.logger.warning('没有可领取的生活特权')
+            return False
+        
+        self.logger.info(f'找到 {len(welfare_list)} 个可领取的生活特权')
+        
+        # 尝试领取第一个可用的特权
+        for welfare in welfare_list:
+            goods_no = welfare.get('goodsNo')
+            goods_name = welfare.get('goodsName')
+            show_name = welfare.get('showName')
+            
+            if not goods_no:
+                continue
+            
+            display_name = f"{show_name} - {goods_name}" if show_name else goods_name
+            
+            # 使用任务的 taskCode
+            if self.receive_welfare(goods_no, display_name, self.taskCode):
+                return True
+            
+            # 如果领取失败,等待一下再尝试下一个
+            time.sleep(1)
+        
+        return False
     
-    print("\n" + "="*50)
-    print("推送内容:")
-    print(content)
-    print("="*50)
+    def run_all_tasks(self) -> tuple[int, int]:
+        """执行所有任务
+        
+        Returns:
+            tuple: (执行前积分, 执行后积分)
+        """
+        print('-'*50)
+        
+        # 只在这里显示一次任务列表更新信息
+        self.logger.info('正在获取任务列表...')
+        tasks = self.get_task_list()
+        if not tasks:
+            self.logger.error('获取任务列表失败')
+            return (0, 0)
+        
+        points_before = self.total_points
+        self.logger.points_info(points_before, "执行前积分")
+        
+        for task in tasks:
+            task_title = task.get('title', '未知任务')
+            task_status = task.get('status')
+            
+            # 状态3表示已完成
+            if task_status == 3:
+                self.logger.success(f'{task_title} - 已完成')
+                continue
+            
+            # 跳过特定任务
+            if task_title in self.config.SKIP_TASKS:
+                self.logger.task_skip(task_title)
+                continue
+            
+            # 提取任务属性
+            self._set_task_attrs(task)
+            
+            # 检查是否成功提取 taskCode
+            if not self.taskCode:
+                # 如果taskCode为空，尝试从buttonRedirect中提取
+                if 'buttonRedirect' in task:
+                    self.logger.info(f'尝试从buttonRedirect中提取taskCode: {task_title}')
+                    extracted_task_id = self._extract_task_id_from_url(task['buttonRedirect'])
+                    if extracted_task_id:
+                        self.taskCode = extracted_task_id
+                        self.logger.info(f'成功从buttonRedirect中提取到taskCode: {self.taskCode}')
+                    else:
+                        self.logger.warning(f'{task_title} - 无法从buttonRedirect提取taskCode，跳过')
+                        continue
+                else:
+                    self.logger.warning(f'{task_title} - 无法提取taskCode，跳过')
+                    continue
+            
+            # 发现任务
+            self.logger.task_found(task_title, task_status)
+            
+            # 特殊任务处理 - 需要在状态判断之前处理
+            if '领任意生活特权福利' in task_title:
+                # 先处理生活特权领取
+                if self.handle_welfare_task(task_title):
+                    time.sleep(2)
+                    # 然后执行任务提交
+                    if self.execute_task():
+                        self.logger.task_complete(task_title)
+                        time.sleep(2)
+                        # 领取奖励
+                        if self.receive_task_reward():
+                            self.logger.reward_get(task_title)
+                            self._update_points()
+                    else:
+                        self.logger.warning(f'任务执行失败: {task_title}')
+                else:
+                    self.logger.warning(f'{task_title} - 无法完成,跳过')
+                time.sleep(3)
+                continue
+            
+            # 状态1表示需要先执行任务
+            if task_status == 1:
+                # 特殊处理连签7天任务
+                if '连签7天' in task_title and 'process' in task:
+                    current, total = map(int, task['process'].split('/'))
+                    if current < total:
+                        self.logger.info(f'【{task_title}】进度: {task["process"]}，还需{total - current}天')
+                        continue
+                
+                if self.execute_task():
+                    self.logger.task_complete(task_title)
+                    time.sleep(2)
+                    # 执行成功后，将状态更新为2（可领取奖励）
+                    task_status = 2
+                else:
+                    self.logger.warning(f'任务执行失败: {task_title}')
+                    continue
+            
+            # 状态2表示可领取奖励
+            if task_status == 2:
+                # 先尝试直接领取奖励
+                if self.receive_task_reward():
+                    self.logger.reward_get(task_title)
+                    # 更新积分
+                    self._update_points()
+                    continue
+                
+                # 如果直接领取失败，尝试先执行任务再领取
+                if self.execute_task():
+                    self.logger.task_complete(task_title)
+                    time.sleep(2)
+                    # 再次尝试领取奖励
+                    if self.receive_task_reward():
+                        self.logger.reward_get(task_title)
+                        self._update_points()
+                else:
+                    self.logger.warning(f'任务执行失败: {task_title}')
+                continue
+            
+            time.sleep(3)
+        
+        # 获取最新积分
+        tasks = self.get_task_list()
+        points_after = self.total_points if tasks else points_before
+        if tasks:
+            self.logger.points_info(points_after, "执行后积分")
+        
+        return (points_before, points_after)
+
+
+# ==================== 账号管理器 ====================
+class AccountManager:
+    """账号管理器"""
     
+    def __init__(self, account_url: str, account_index: int, config: Config):
+        self.account_url = account_url
+        self.account_index = account_index + 1
+        self.config = config
+        self.logger = Logger()
+        self.proxy_manager = ProxyManager(config.PROXY_API_URL)
+        
+        # 登录重试机制（参考顺丰代理.py的实现）
+        self.login_success = False
+        self.user_id = None
+        self.phone = None
+        self.http_client = None
+        
+        retry_count = 0
+        while retry_count < MAX_PROXY_RETRIES and not self.login_success:
+            try:
+                # 每次重试都重新获取代理和创建HTTP客户端
+                self.http_client = SFHttpClient(config, self.proxy_manager)
+                
+                # 尝试登录（带超时）
+                success, self.user_id, self.phone = self.http_client.login(account_url)
+                
+                if success:
+                    masked_phone = self.phone[:3] + "*" * 4 + self.phone[7:]
+                    self.logger.user_info(self.account_index, masked_phone)
+                    self.login_success = True
+                    break
+                else:
+                    if retry_count < MAX_PROXY_RETRIES - 1:
+                        print(f'账号{self.account_index} 登录失败，尝试重新获取代理 ({retry_count + 1}/{MAX_PROXY_RETRIES})')
+                        time.sleep(2)
+            except Exception as e:
+                print(f'账号{self.account_index} 登录异常: {str(e)[:100]}')
+            
+            retry_count += 1
+        
+        # 如果所有代理重试都失败，记录错误
+        if not self.login_success:
+            self.logger.error(f'账号{self.account_index} 登录失败，已重试{MAX_PROXY_RETRIES}次，所有代理均不可用')
+    
+    def run(self) -> Dict[str, Any]:
+        """运行账号任务
+        
+        Returns:
+            Dict: 包含账号统计信息的字典
+        """
+        if not self.login_success:
+            return {
+                'success': False,
+                'phone': '',
+                'points_before': 0,
+                'points_after': 0,
+                'points_earned': 0,
+                'sign_success': False,
+                'countDay': 0,
+                'sign_error': '登录失败'
+            }
+        
+        # 随机延迟
+        wait_time = random.randint(1000, 3000) / 1000.0
+        time.sleep(wait_time)
+        
+        # 初始化任务执行器
+        executor = TaskExecutor(self.http_client, self.logger, self.config, self.user_id)
+        
+        # 先执行APP签到
+        app_sign_success, app_error_msg = executor.app_sign_in()
+        time.sleep(1)
+        
+        # 再执行小程序签到
+        sign_success, count_day, packet_name, sign_error = executor.sign_in()
+        
+        # 如果签到失败且错误信息包含“活动太火爆”，尝试重新登录
+        if not sign_success and '活动太火爆' in sign_error:
+            max_retries = 3
+            for retry in range(max_retries):
+                self.logger.warning(f'签到失败（代理IP问题），{2}秒后重新获取代理并重试（第{retry + 1}次）...')
+                time.sleep(2)
+                
+                try:
+                    # 重新创建HTTP客户端（会自动获取新代理）
+                    self.http_client = SFHttpClient(self.config, self.proxy_manager)
+                    
+                    # 重新登录
+                    success, self.user_id, self.phone = self.http_client.login(self.account_url)
+                    
+                    if success:
+                        # 更新执行器的HTTP客户端
+                        executor.http = self.http_client
+                        executor.user_id = self.user_id
+                        
+                        # 重试签到
+                        sign_success, count_day, packet_name, sign_error = executor.sign_in()
+                        
+                        if sign_success:
+                            self.logger.success('重新登录后签到成功')
+                            break
+                        elif '活动太火爆' not in sign_error:
+                            # 如果不是代理问题，则不再重试
+                            break
+                    else:
+                        if retry == max_retries - 1:
+                            self.logger.error(f'重新登录失败，已重试{max_retries}次')
+                except Exception as e:
+                    if retry == max_retries - 1:
+                        self.logger.error(f'重新登录异常: {str(e)[:100]}，已重试{max_retries}次')
+        
+        # 执行其他任务
+        points_before, points_after = executor.run_all_tasks()
+        points_earned = points_after - points_before
+        
+        # 返回统计信息
+        return {
+            'success': True,
+            'phone': self.phone,
+            'points_before': points_before,
+            'points_after': points_after,
+            'points_earned': points_earned,
+            'sign_success': sign_success,
+            'countDay': count_day,
+            'sign_error': sign_error
+        }
+
+
+# ==================== 单账号执行函数 ====================
+def run_single_account(account_info: str, index: int, config: Config) -> Dict[str, Any]:
+    """
+    执行单个账号的任务（线程安全）
+    
+    Args:
+        account_info: 账号信息
+        index: 账号索引
+        config: 配置对象
+    
+    Returns:
+        Dict: 包含账号统计信息的字典
+    """
     try:
-        notify_send(title, content)
-        print("✅ 推送发送成功")
-    except NameError:
-        print("❌ notify模块未找到，无法发送推送")
-    except Exception as e:
-        print(f"❌ 推送发送失败: {str(e)}")
-
-def main():
-    global force_push
-    ENV_NAME = 'sfsyUrl'
-    local_version = '2025.10.08'
-    token = os.getenv(ENV_NAME)
-    if not token:
-        print(f"❌ 未找到环境变量 {ENV_NAME}，请检查配置")
-        return
-    tokens = token.split('&')
-    tokens = [t.strip() for t in tokens if t.strip()]
-    if len(tokens) == 0:
-        print(f"❌ 环境变量 {ENV_NAME} 为空或格式错误")
-        return
+        with print_lock:
+            print(f"🚀 开始执行账号{index + 1}")
         
-    print(f"==================================")
-    print(f"📱 共获取到{len(tokens)}个账号")
-    print(f"==================================")
-    
-    for index, infos in enumerate(tokens):
-        run_result = RUN(infos, index).main()
-        if not run_result: 
-            continue
+        account = AccountManager(account_info, index, config)
+        result = account.run()
+        
+        if result['success']:
+            with print_lock:
+                print(f"✅ 账号{index + 1}执行完成")
+        else:
+            with print_lock:
+                print(f"❌ 账号{index + 1}执行失败")
+        
+        result['index'] = index
+        return result
+    except Exception as e:
+        error_msg = f"账号{index + 1}执行异常: {str(e)}"
+        with print_lock:
+            print(f"❌ {error_msg}")
+        return {
+            'index': index,
+            'success': False,
+            'phone': '',
+            'points_before': 0,
+            'points_after': 0,
+            'points_earned': 0,
+            'sign_success': False,
+            'countDay': 0,
+            'sign_error': error_msg
+        }
 
-    # 发送推送
-    if force_push or PUSH_SWITCH == '1':
-        send_notification()
+
+# ==================== 主程序 ====================
+def main():
+    """主函数"""
+    config = Config()
+
+    env_value = os.getenv(config.ENV_NAME)
+    if not env_value:
+        print(f"❌ 未找到环境变量 {config.ENV_NAME}，请检查配置")
+        return
+
+    account_urls = [url.strip() for url in env_value.split('&') if url.strip()]
+    if not account_urls:
+        print(f"❌ 环境变量 {config.ENV_NAME} 为空或格式错误")
+        return
+
+    # 随机打乱账号顺序
+    random.shuffle(account_urls)
+    print(f"🔀 已随机打乱账号执行顺序")
+
+    print("=" * 50)
+    print(f"🎉 {config.APP_NAME} v{config.VERSION}")
+    print(f"👨‍💻 作者: 爱学习的呆子")
+    print(f"📱 共获取到 {len(account_urls)} 个账号")
+    print(f"⚙️ 并发数量: {CONCURRENT_NUM}")
+    print(f"⏰ 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 50)
+    
+    # 收集所有账号的统计信息
+    all_results = []
+    
+    if CONCURRENT_NUM <= 1:
+        # 串行执行模式
+        print("🔄 使用串行模式执行...")
+        for index, account_url in enumerate(account_urls):
+            account = AccountManager(account_url, index, config)
+            result = account.run()
+            result['index'] = index
+            all_results.append(result)
+            
+            if index < len(account_urls) - 1:
+                print("=" * 50)
+                print(f"⏳ 等待 2 秒后执行下一个账号...")
+                time.sleep(2)
     else:
-        print("✅ 推送开关已关闭，所有账号CK有效，不发送推送通知")    
+        # 并发执行模式
+        print(f"🔄 使用并发模式执行，并发数: {CONCURRENT_NUM}")
+        
+        # 使用线程池执行
+        with ThreadPoolExecutor(max_workers=CONCURRENT_NUM) as executor:
+            # 提交所有任务
+            future_to_index = {
+                executor.submit(run_single_account, account_url, index, config): index 
+                for index, account_url in enumerate(account_urls)
+            }
+            
+            # 等待任务完成
+            for future in as_completed(future_to_index):
+                result = future.result()
+                all_results.append(result)
+    
+    # 按索引排序结果
+    all_results.sort(key=lambda x: x['index'])
+    
+    # 统计成功和失败数量
+    success_count = sum(1 for r in all_results if r['success'])
+    fail_count = len(all_results) - success_count
+    total_earned = sum(r['points_earned'] for r in all_results if r['success'])
+    
+    # 显示汇总统计表格
+    print(f"\n" + "=" * 80)
+    print(f"📊 积分统计汇总")
+    print("=" * 80)
+    print(f"{'序号':<6} {'手机号':<15} {'今日获得积分':<15} {'总积分':<15} {'状态':<10}")
+    print("-" * 80)
+    
+    for result in all_results:
+        index = result['index'] + 1
+        phone = result['phone'][:3] + "****" + result['phone'][7:] if result['phone'] else "未登录"
+        earned = result['points_earned']
+        total = result['points_after']
+        status = "✅成功" if result['success'] else "❌失败"
+        
+        print(f"{index:<6} {phone:<15} {earned:<15} {total:<15} {status:<10}")
+    
+    print("-" * 80)
+    print(f"{'汇总':<6} {'账号总数: ' + str(len(all_results)):<15} {'今日总获得: ' + str(total_earned):<15} {'':<15} {'成功: ' + str(success_count):<10}")
+    print("=" * 80)
+    
+    print("\n🎊 所有账号任务执行完成!")
+    
+    # ==================== Bark推送 ====================
+    if PUSH_SWITCH == "1" and BARK_PUSH:
+        
+        # 自动补全Bark地址（若只提供了Key）
+        bark_url = BARK_PUSH
+        if not bark_url.startswith('http://') and not bark_url.startswith('https://'):
+            bark_url = 'https://api.day.app/' + bark_url
+        
+        title = "🚚 顺丰速运签到结果\n"
+        body = ""
+        for r in all_results:
+            index = r['index'] + 1
+            phone = r.get('phone', '')
+            masked_phone = phone[:3] + "****" + phone[7:] if phone and len(phone) == 11 else phone
+            body += f"👤 账号{index}:【{masked_phone}】\n"
+            if r.get('success'):
+                sign_success = r.get('sign_success', False)
+                if sign_success:
+                    count_day = r.get('countDay', 0)
+                    total_sign_day = count_day + 1
+                    body += f"✨ 签到成功，本周累计签到【{total_sign_day}】天\n"
+                else:
+                    sign_error = r.get('sign_error', '未知错误')
+                    body += f"⚠️ 签到失败：{sign_error}\n"
+                points_after = r.get('points_after', 0)
+                points_earned = r.get('points_earned', 0)
+                body += f"💰 当前积分：【{points_after}】（{'+' if points_earned>=0 else ''}{points_earned}）\n"
+            else:
+                body += f"❌ 账号执行失败\n"
+            body += "\n"
+        
+        # 发送推送
+        try:
+            data = {
+                "title": title,
+                "body": body.strip(),
+                "icon": BARK_ICON,
+                "group": BARK_GROUP
+            }
+            resp = requests.post(bark_url, json=data, timeout=10)
+            if resp.status_code == 200:
+                print(f"✅ Bark推送成功")
+            else:
+                print(f"⚠️ Bark推送失败，状态码: {resp.status_code}")
+        except Exception as e:
+            print(f"❌ Bark推送异常: {e}")
+    else:
+        if not BARK_PUSH:
+            print("\n📱 未配置BARK_PUSH，跳过推送")
+        elif PUSH_SWITCH != "1":
+            print("\n📱 推送开关已关闭，跳过推送")
+
 
 if __name__ == '__main__':
     main()
