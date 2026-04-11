@@ -1173,10 +1173,38 @@ class RewardsService:
         token = token_match.group(1) if token_match else None
         
         if available_points is None or email is None:
-            print_log("账号信息", "Cookie可能已失效，无法获取积分和邮箱", account_index)
+            # 新版dashboard可能无法从页面提取积分，尝试通过API获取
+            try:
+                api_data = self.get_dashboard_data(cookies, account_index, silent=True)
+                if api_data:
+                    user_status = api_data.get('dashboard', {}).get('userStatus', {})
+                    if available_points is None:
+                        available_points = user_status.get('availablePoints')
+                    if email is None:
+                        profile = api_data.get('profile', {})
+                        email = profile.get('email')
+            except Exception as e:
+                print_log("API获取", f"通过API获取积分失败: {e}", account_index)
+                pass
+
+        if available_points is None:
+            print_log("账号信息", "Cookie可能已失效，无法获取积分", account_index)
             # 立即推送Cookie失效通知
             self._send_cookie_invalid_notification(account_index)
             return None
+
+        # 如果email为None，尝试从Cookie中推断邮箱域名
+        if email is None:
+            email_domain = "outlook.com"  # 默认使用outlook.com
+            # 尝试从Cookie中提取可能的邮箱信息
+            if cookies:
+                # 检查是否有WLS字段，可能包含用户信息
+                wls_match = re.search(r'WLS=([^;]+)', cookies)
+                if wls_match:
+                    # WLS字段可能包含编码的用户名
+                    pass
+            email = f"账号{account_index}@{email_domain}"
+            print_log("账号信息", f"无法获取邮箱，使用默认值: {email}", account_index)
         
         if token is None:
             print_log("账号信息", "无法获取RequestVerificationToken", account_index)
@@ -1249,14 +1277,14 @@ class RewardsService:
     def get_account_level(self, dashboard_data: Dict[str, Any]) -> str:
         """获取账号等级"""
         if not dashboard_data:
-            return "Level1"
+            return "newLevel1"
         dashboard = dashboard_data.get('dashboard', {})
         user_status = dashboard.get('userStatus', {})
         level_info = user_status.get('levelInfo', {})
         # 确保level_info不为None
         if not level_info:
-            return "Level1"
-        return level_info.get('activeLevel', 'Level1')
+            return "newLevel1"
+        return level_info.get('activeLevel', 'newLevel1')
 
     # ==================== 3. 令牌相关方法 ====================
     @retry_on_failure()
@@ -2275,7 +2303,7 @@ class RewardsBot:
     def _get_account_level_details(self, dashboard_data: Dict[str, Any]) -> Dict[str, Any]:
         """获取详细的账号等级信息"""
         if not dashboard_data:
-            return {'level': 'Level1', 'name': '一级', 'progress': 0, 'max': 0}
+            return {'level': 'newLevel1', 'name': '会员', 'progress': 0, 'max': 0}
         
         dashboard = dashboard_data.get('dashboard', {})
         user_status = dashboard.get('userStatus', {})
@@ -2283,14 +2311,14 @@ class RewardsBot:
         
         # 确保level_info不为None
         if not level_info:
-            return {'level': 'Level1', 'name': '一级', 'progress': 0, 'max': 0}
+            return {'level': 'newLevel1', 'name': '会员', 'progress': 0, 'max': 0}
         
         return {
-            'level': level_info.get('activeLevel', 'Level1'),
-            'name': level_info.get('activeLevelName', '一级'),
+            'level': level_info.get('activeLevel', 'newLevel1'),
+            'name': level_info.get('activeLevelName', '会员'),
             'progress': level_info.get('progress', 0),
             'max': level_info.get('progressMax', 0),
-            'last_month_level': level_info.get('lastMonthLevel', 'Level1')
+            'last_month_level': level_info.get('lastMonthLevel', 'newLevel1')
         }
 
     def process_single_account(self, account: AccountInfo, service: RewardsService, stop_event: threading.Event) -> Optional[str]:
@@ -2449,7 +2477,7 @@ class RewardsBot:
             logger.warning("电脑搜索", "无法获取状态", account_index)
         
         # 移动搜索 - 只有非1级账号才执行
-        if account_level != "Level1":
+        if account_level != "newLevel1":
             # 重新获取dashboard数据，因为电脑搜索可能已经改变了状态
             dashboard_data = service.get_dashboard_data(cookies, account_index)
             
@@ -2612,7 +2640,7 @@ class RewardsBot:
                 # 搜索任务进度
                 # 获取详细账号等级信息
                 level_details = self._get_account_level_details(dashboard_data)
-                account_level = level_details.get('level', 'Level1') if level_details else 'Level1'
+                account_level = level_details.get('level', 'newLevel1') if level_details else 'newLevel1'
                 
                 # 电脑搜索进度
                 pc_search_tasks = counters.get("pcSearch", [])
@@ -2626,7 +2654,7 @@ class RewardsBot:
                     lines.append("💻电脑搜索: 无数据")
                 
                 # 移动搜索进度 - 只有非1级账号才显示
-                if account_level != "Level1":
+                if account_level != "newLevel1":
                     mobile_search_tasks = counters.get("mobileSearch", [])
                     if mobile_search_tasks:
                         for task in mobile_search_tasks:
