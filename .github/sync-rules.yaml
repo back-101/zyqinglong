@@ -1,9 +1,9 @@
 version: "1.0"
-repositories:
+仓库:
   # 示例1：只要单个文件
   wanvfx-tst:
     source: "https://github.com/wanvfx/zyqinglong"
-    branch: "main"
+    分支: "main"
     rules:
       - type: "include"
         patterns: ["tst.py"]
@@ -12,7 +12,7 @@ repositories:
   # 示例2：排除特定文件
   linbailo-clean:
     source: "https://github.com/linbailo/zyqinglong"
-    branch: "main"
+    分支: "main"
     rules:
       - type: "exclude"
         patterns: ["tsthb.py", "README.md", "readme.md", "bwcj.js", "得物森林.py", "顺丰端午版本.py", "SFSY.py", "ddgy.py", "sendNotify.py"]
@@ -20,16 +20,16 @@ repositories:
 
   gitee-hlt1995:
     source: "https://gitee.com/hlt1995/qlScripts"
-    branch: "main"  # Gitee 通常用 master
+    分支: "main"  # Gitee 通常用 master
     rules:
       - type: "include"
-        patterns: ["ChinaTelecomyyt.js", "Microsoft_Rewards_v2.1.py", "SFExpress.py", "mcloud.py","Tomato_King.py"]
+        patterns: ["ChinaTelecomyyt.js", "SFExpress.py", "mcloud.py","Tomato_King.py"]
     target_dir: "."  # 根目录
 
   # 新的 Gitee 仓库，排除指定文件
   gitee-liu-long068:
     source: "https://gitee.com/liu-long068/QL_TimingScript"
-    branch: "master"
+    分支: "master"
     rules:
       - type: "exclude"
         patterns: 
@@ -53,7 +53,7 @@ repositories:
     
   gitee-shitou158:
     source: "https://gitee.com/shitou158/qlScript"
-    branch: "master"
+    分支: "master"
     rules:
       - type: "exclude"
         patterns: 
