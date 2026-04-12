@@ -23,7 +23,7 @@ version: "1.0"
     分支: "main"  # Gitee 通常用 master
     rules:
       - type: "include"
-        patterns: ["ChinaTelecomyyt.js", "SFExpress.py", "mcloud.py","Tomato_King.py"]
+        patterns: ["ChinaTelecomyyt.js", "SFExpress.py", "Tomato_King.py"]
     target_dir: "."  # 根目录
 
   # 新的 Gitee 仓库，排除指定文件
