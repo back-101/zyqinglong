@@ -10,4 +10,6 @@ https://gitee.com/liu-long068/QL_TimingScript
 
 https://gitee.com/shitou158/qlScript
 
+https://github.com/lzwme/ql-scripts
+
 #### 脚本来自网络，如有侵权，请联系删除！
