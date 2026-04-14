@@ -1,9 +1,9 @@
 version: "1.0"
-仓库:
+repositories:
   # 示例1：只要单个文件
   wanvfx-tst:
     source: "https://github.com/wanvfx/zyqinglong"
-    分支: "main"
+    branch: "main"
     rules:
       - type: "include"
         patterns: ["tst.py"]
@@ -12,7 +12,7 @@ version: "1.0"
   # 示例2：排除特定文件
   linbailo-clean:
     source: "https://github.com/linbailo/zyqinglong"
-    分支: "main"
+    branch: "main"
     rules:
       - type: "exclude"
         patterns: ["tsthb.py", "README.md", "readme.md", "bwcj.js", "得物森林.py", "顺丰端午版本.py", "SFSY.py", "ddgy.py", "sendNotify.py"]
@@ -20,16 +20,16 @@ version: "1.0"
 
   gitee-hlt1995:
     source: "https://gitee.com/hlt1995/qlScripts"
-    分支: "main"  # Gitee 通常用 master
+    branch: "main"
     rules:
       - type: "include"
         patterns: ["ChinaTelecomyyt.js", "SFExpress.py", "Tomato_King.py"]
-    target_dir: "."  # 根目录
+    target_dir: "."
 
   # 新的 Gitee 仓库，排除指定文件
   gitee-liu-long068:
     source: "https://gitee.com/liu-long068/QL_TimingScript"
-    分支: "master"
+    branch: "master"
     rules:
       - type: "exclude"
         patterns: 
@@ -45,15 +45,14 @@ version: "1.0"
           - ".idea"
           - "anmusi.py"
           - "得物森林.py"
-          # 如果中文文件名有问题，也可以尝试使用通配符
           - "*authorization*"
           - "*得物*"
           - "*森林*"
-    target_dir: "."  # 根目录
+    target_dir: "."
     
   gitee-shitou158:
     source: "https://gitee.com/shitou158/qlScript"
-    分支: "master"
+    branch: "master"
     rules:
       - type: "exclude"
         patterns: 
@@ -62,8 +61,7 @@ version: "1.0"
           - "README.md"
           - "LICENSE"
           - ".gitignore"
-    target_dir: "."  # 根目录
-  
+    target_dir: "."
   # # 示例4：混合规则（先包含后排除）
   # mixed-rules:
   #   source: "https://github.com/another/repo"
