@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-cron: 0 1 8,12,16,20 * * *
+cron: 0 5 8,12,16,20 * * *
 new Env('洛克王国');
 """
 
@@ -38,7 +38,7 @@ def get_status_msg(data):
     if not data or "merchantActivities" not in data:
         return "⚠️ 获取数据失败：接口返回格式异常"
     
-    now_ms = int(get_beijing_time().timestamp() * 1000)
+    现在_ms = int(get_beijing_time().timestamp() * 1000)
     activity = data["merchantActivities"][0] if data["merchantActivities"] else {}
     all_items = (activity.get("get_props") or []) + (activity.get("get_pets") or [])
     
@@ -58,7 +58,7 @@ def get_status_msg(data):
 
     msg = [
         f"📅 活动：{activity.get('name', '远行商人')}",
-        f"⏰ 刷新：08:01 / 12:01 / 16:01 / 20:01",
+        f"⏰ 刷新：08:05 / 12:05 / 16:05 / 20:05",
         f"--- 当前在售商品 ({len(active_items)}) ---",
         "\n".join(active_items)
     ]
