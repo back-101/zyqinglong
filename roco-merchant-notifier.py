@@ -38,7 +38,8 @@ def get_status_msg(data):
     if not data or "merchantActivities" not in data:
         return "⚠️ 获取数据失败：接口返回格式异常"
     
-    现在_ms = int(get_beijing_time().timestamp() * 1000)
+    now_ms = int(get_beijing_time().timestamp() * 1000)
+    
     activity = data["merchantActivities"][0] if data["merchantActivities"] else {}
     all_items = (activity.get("get_props") or []) + (activity.get("get_pets") or [])
     
@@ -46,6 +47,7 @@ def get_status_msg(data):
     for item in all_items:
         s_time = item.get("start_time")
         e_time = item.get("end_time")
+        
         # 筛选当前时间段的商品
         if s_time and e_time:
             if int(s_time) <= now_ms < int(e_time):
